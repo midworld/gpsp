@@ -346,7 +346,7 @@ static const u8 gba_header_logo[156] = {
     case 0x7:                                                                 \
     {                                                                         \
       get_shift_register(reg_sh);                                             \
-      ror(reg_sh, reg_sh, shift);                                             \
+      ror(reg_sh, reg_sh, shift & 0x1F);                                      \
       break;                                                                  \
     }                                                                         \
   }                                                                           \
@@ -497,8 +497,9 @@ static const u8 gba_header_logo[156] = {
       get_shift_register(reg_sh);                                             \
       if(shift != 0)                                                          \
       {                                                                       \
-        c_flag = (reg_sh >> (shift - 1)) & 0x01;                              \
-        ror(reg_sh, reg_sh, shift);                                           \
+        /* Multiples of 32 keep the value but update C. */                  \
+        c_flag = (reg_sh >> ((shift - 1) & 0x1F)) & 0x01;                     \
+        ror(reg_sh, reg_sh, shift & 0x1F);                                    \
       }                                                                       \
       break;                                                                  \
     }                                                                         \
@@ -1008,6 +1009,18 @@ const u32 spsr_masks[4] = { 0x00000000, 0x000000EF, 0xF0000000, 0xF00000EF };
 typedef enum { AccLoad, AccStore } AccMode;
 typedef enum { AddrPreInc, AddrPreDec, AddrPostInc, AddrPostDec } AddrMode;
 
+// S-bit transfers use the user register bank, but their base register stays
+// in the current mode. The FIQ bank also covers r8-r12.
+inline u32 &arm_block_transfer_reg(u32 index, bool user_bank) {
+  if (user_bank &&
+      ((index >= 8 && index <= 12 && reg[CPU_MODE] == MODE_FIQ) ||
+       (index >= REG_SP && index <= REG_LR &&
+        reg[CPU_MODE] != MODE_USER && reg[CPU_MODE] != MODE_SYSTEM)))
+    return REG_MODE(MODE_USER)[index - 8];
+
+  return reg[index];
+}
+
 template<AccMode mode, bool writeback, bool sbit, AddrMode addr_mode>
 inline cpu_alert_type exec_arm_block_mem(u32 rn, u32 reglist, s32 &cycles_remaining) {
   cpu_alert_type cpu_alert = CPU_ALERT_NONE;
@@ -1026,12 +1039,9 @@ inline cpu_alert_type exec_arm_block_mem(u32 rn, u32 reglist, s32 &cycles_remain
                 (addr_mode == AddrPreDec)  ? endaddr : endaddr + 4;
   address &= ~3U;
 
-  // If sbit is set, change to user mode and back, so to write the user regs.
-  // However for LDM {PC} we restore CPSR from SPSR.
-  // TODO: implement CPSR restore, only USER mode is now implemented.
-  u32 old_cpsr = reg[REG_CPSR];
-  if (sbit && (mode == AccStore || rn != REG_PC))
-    set_cpu_mode(MODE_USER);
+  // LDM^ with PC uses the current bank and restores CPSR after the transfer.
+  // Other S-bit transfers use user registers, independent of the base bank.
+  bool user_bank = sbit && (mode == AccStore || !(reglist & (1U << REG_PC)));
 
   // If base is in the reglist and writeback is enabled, the value of the
   // written register depends on the write cycle (ARM7TDM manual 4.11.6).
@@ -1050,9 +1060,13 @@ inline cpu_alert_type exec_arm_block_mem(u32 rn, u32 reglist, s32 &cycles_remain
   for (u32 i = 0; i < 16; i++)  {
     if ((reglist >> i) & 0x01) {
       if (mode == AccLoad) {
-        load_aligned32(address, reg[i]);
+        u32 value;
+        load_aligned32(address, value);
+        arm_block_transfer_reg(i, user_bank) = value;
       } else {
-        store_aligned32(address, (i == REG_PC) ? reg[REG_PC] + 4 : reg[i]);
+        // PC was advanced by 4 above; STM stores instruction PC+12.
+        store_aligned32(address, (i == REG_PC) ? reg[REG_PC] + 8 :
+                        arm_block_transfer_reg(i, user_bank));
       }
       address += 4;
     }
@@ -1060,9 +1074,6 @@ inline cpu_alert_type exec_arm_block_mem(u32 rn, u32 reglist, s32 &cycles_remain
 
   if (writeback && !writeback_first)
     reg[rn] = endaddr;
-
-  if (sbit && (mode == AccStore || rn != REG_PC))
-    set_cpu_mode(cpu_modes[old_cpsr & 0xF]);
 
   return cpu_alert;
 }
@@ -1130,6 +1141,7 @@ inline cpu_alert_type exec_thumb_block_mem(u32 rn, u32 reglist, s32 &cycles_rema
   u32 temp;                                                                   \
   load_memory_##type(reg[rn], temp);                                          \
   store_memory_##type(reg[rn], reg[rm]);                                      \
+  cycles_remaining--;                                                         \
   reg[rd] = temp;                                                             \
   arm_pc_offset(4);                                                           \
 }                                                                             \
@@ -1186,9 +1198,10 @@ inline cpu_alert_type exec_thumb_block_mem(u32 rn, u32 reglist, s32 &cycles_rema
 // Decode types: shift, alu_op
 // Operation types: lsl, lsr, asr, ror
 // Affects N/Z/C flags
+// Register shifts use only Rs[7:0].
 
 #define thumb_shift_lsl_reg()                                                 \
-  u32 shift = reg[rs];                                                        \
+  u32 shift = reg[rs] & 0xFF;                                                 \
   u32 dest = reg[rd];                                                         \
   if(shift != 0)                                                              \
   {                                                                           \
@@ -1208,7 +1221,7 @@ inline cpu_alert_type exec_thumb_block_mem(u32 rn, u32 reglist, s32 &cycles_rema
   }                                                                           \
 
 #define thumb_shift_lsr_reg()                                                 \
-  u32 shift = reg[rs];                                                        \
+  u32 shift = reg[rs] & 0xFF;                                                 \
   u32 dest = reg[rd];                                                         \
   if(shift != 0)                                                              \
   {                                                                           \
@@ -1228,7 +1241,7 @@ inline cpu_alert_type exec_thumb_block_mem(u32 rn, u32 reglist, s32 &cycles_rema
   }                                                                           \
 
 #define thumb_shift_asr_reg()                                                 \
-  u32 shift = reg[rs];                                                        \
+  u32 shift = reg[rs] & 0xFF;                                                 \
   u32 dest = reg[rd];                                                         \
   if(shift != 0)                                                              \
   {                                                                           \
@@ -1245,12 +1258,12 @@ inline cpu_alert_type exec_thumb_block_mem(u32 rn, u32 reglist, s32 &cycles_rema
   }                                                                           \
 
 #define thumb_shift_ror_reg()                                                 \
-  u32 shift = reg[rs];                                                        \
+  u32 shift = reg[rs] & 0xFF;                                                 \
   u32 dest = reg[rd];                                                         \
   if(shift != 0)                                                              \
   {                                                                           \
-    c_flag = (dest >> (shift - 1)) & 0x01;                                    \
-    ror(dest, dest, shift);                                                   \
+    c_flag = (dest >> ((shift - 1) & 0x1F)) & 0x01;                           \
+    ror(dest, dest, shift & 0x1F);                                            \
   }                                                                           \
 
 #define thumb_shift_lsl_imm()                                                 \
@@ -1381,11 +1394,7 @@ inline cpu_alert_type exec_thumb_block_mem(u32 rn, u32 reglist, s32 &cycles_rema
   cycles_remaining -= ws_cyc_nseq[reg[REG_PC] >> 24][0];                      \
 }                                                                             \
 
-// When a mode change occurs from non-FIQ to non-FIQ retire the current
-// reg[13] and reg[14] into reg_mode[cpu_mode][5] and reg_mode[cpu_mode][6]
-// respectively and load into reg[13] and reg[14] reg_mode[new_mode][5] and
-// reg_mode[new_mode][6]. When swapping to/from FIQ retire/load reg[8]
-// through reg[14] to/from reg_mode[MODE_FIQ][0] through reg_mode[MODE_FIQ][6].
+// r8-r12 are shared by all modes except FIQ. r13-r14 have separate banks.
 
 const u32 cpu_modes[16] =
 {
@@ -1407,28 +1416,33 @@ void set_cpu_mode(cpu_mode_type new_mode)
   if(cpu_mode == new_mode)
      return;
 
-  if(new_mode == MODE_FIQ)
-  {
-     for (u32 i = 8; i < 15; i++)
-        REG_MODE(cpu_mode)[i - 8] = reg[i];
-  }
-  else
-  {
-     REG_MODE(cpu_mode)[5] = reg[REG_SP];
-     REG_MODE(cpu_mode)[6] = reg[REG_LR];
-  }
-
   if(cpu_mode == MODE_FIQ)
   {
-     for (u32 i = 8; i < 15; i++)
-        reg[i] = REG_MODE(new_mode)[i - 8];
+     for (u32 i = 8; i < 13; i++)
+        REG_MODE(MODE_FIQ)[i - 8] = reg[i];
   }
-  else
+  else if(new_mode == MODE_FIQ)
   {
-     reg[REG_SP] = REG_MODE(new_mode)[5];
-     reg[REG_LR] = REG_MODE(new_mode)[6];
+     for (u32 i = 8; i < 13; i++)
+        REG_MODE(MODE_USER)[i - 8] = reg[i];
   }
 
+  REG_MODE(cpu_mode)[5] = reg[REG_SP];
+  REG_MODE(cpu_mode)[6] = reg[REG_LR];
+
+  if(new_mode == MODE_FIQ)
+  {
+     for (u32 i = 8; i < 13; i++)
+        reg[i] = REG_MODE(MODE_FIQ)[i - 8];
+  }
+  else if(cpu_mode == MODE_FIQ)
+  {
+     for (u32 i = 8; i < 13; i++)
+        reg[i] = REG_MODE(MODE_USER)[i - 8];
+  }
+
+  reg[REG_SP] = REG_MODE(new_mode)[5];
+  reg[REG_LR] = REG_MODE(new_mode)[6];
   reg[CPU_MODE] = new_mode;
 }
 
