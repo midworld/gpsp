@@ -396,7 +396,7 @@ static inline void touch_gamepak_page(u32 physical_index)
   u32 idx = (physical_index >> 5) & 31;
   u32 bof = physical_index & 31;
 
-  gamepak_sticky_bit[idx] |= (1 << bof);
+  gamepak_sticky_bit[idx] |= (1u << bof);
 }
 
 static inline void clear_gamepak_stickybits(void)

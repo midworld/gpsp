@@ -18,7 +18,9 @@
  */
 
 #include "common.h"
+#include "gpsp_memory.h"
 #include "streams/file_stream.h"
+#include "gba_rom_scan.h"
 
 /* Sound */
 #define gbc_sound_tone_control_low(channel, regn)                             \
@@ -383,21 +385,19 @@ bool gamepak_header_nonstandard;
 // We allocate in 1MB chunks.
 const unsigned gamepak_buffer_blocksize = 1024*1024;
 
-// LRU queue with the loaded blocks and what they map to
-struct {
-  u16 next_lru;             /* Index in the struct to the next LRU entry */
-  s16 phy_rom;              /* ROM page number (-1 means not mapped) */
-} gamepak_blk_queue[1024];
-
-u16 gamepak_lru_head;
-u16 gamepak_lru_tail;
+// Clock replacement over the 32KB slots of the loaded blocks. The hand
+// unmaps a resident page it passes but keeps its data; the next access
+// maps it again without a file read, which marks the page as used.
+s16 gamepak_slot_page[1024];  /* ROM page in each slot, or -1 */
+s16 gamepak_page_slot[1024];  /* Slot holding each ROM page, or -1 */
+u16 gamepak_clock_hand;
 
 // Stick page bit: prevents page eviction for a frame. This is used to prevent
 // unmapping code pages while being used (ie. in the interpreter).
 u32 gamepak_sticky_bit[1024/32];
 
 #define gamepak_sb_test(idx) \
- (gamepak_sticky_bit[((unsigned)(idx)) >> 5] & (1 << (((unsigned)(idx)) & 31)))
+ (gamepak_sticky_bit[((unsigned)(idx)) >> 5] & (1u << (((unsigned)(idx)) & 31)))
 
 // This is global so that it can be kept open for large ROMs to swap
 // pages from, so there's no slowdown with opening and closing the file
@@ -2471,32 +2471,42 @@ cpu_alert_type dma_transfer(unsigned dma_chan, int *usedcycles)
   }                                                                           \
 
 
+static void reset_gamepak_slots(void)
+{
+  memset(gamepak_slot_page, 0xFF, sizeof(gamepak_slot_page));
+  memset(gamepak_page_slot, 0xFF, sizeof(gamepak_page_slot));
+  gamepak_clock_hand = 0;
+}
+
+static u8 *gamepak_slot_ptr(u32 slot)
+{
+  return &gamepak_buffers[slot / 32][32 * 1024 * (slot % 32)];
+}
+
 static u32 evict_gamepak_page(void)
 {
-  u32 ret;
-  s16 phyrom;
-  do {
-    // Return the index to the last used entry
-    u32 newhead = gamepak_blk_queue[gamepak_lru_head].next_lru;
-    phyrom = gamepak_blk_queue[gamepak_lru_head].phy_rom;
-    ret = gamepak_lru_head;
+  u32 slots = 32 * gamepak_buffer_count;
+  while (1)
+  {
+    u32 slot = gamepak_clock_hand;
+    s16 phyrom = gamepak_slot_page[slot];
+    gamepak_clock_hand = (u16)((slot + 1) % slots);
 
-    // Second elem becomes head now
-    gamepak_lru_head = newhead;
+    if (phyrom < 0)
+      return slot;
+    // Sticky pages are in use by the interpreter
+    if (gamepak_sb_test(phyrom))
+      continue;
+    // Mapped means used since the hand last passed: unmap and keep it
+    if (memory_map_read[(0x8000000 >> 15) + phyrom]) {
+      map_rom_entry(read, phyrom, NULL, gamepak_size >> 15);
+      continue;
+    }
 
-    // The evicted element goes at the end of the queue
-    gamepak_blk_queue[gamepak_lru_tail].next_lru = ret;
-    gamepak_lru_tail = ret;
-    // If this page is marked as sticky, we keep going through the list
-  } while (phyrom >= 0 && gamepak_sb_test(phyrom));
-
-  // We unmap the ROM page if it was mapped, ensure we do not access it
-  // without triggering a "page fault"
-  if (phyrom >= 0) {
-    map_rom_entry(read, phyrom, NULL, gamepak_size >> 15);
+    gamepak_page_slot[phyrom] = -1;
+    gamepak_slot_page[slot] = -1;
+    return slot;
   }
-
-  return ret;
 }
 
 u8 *load_gamepak_page(u32 physical_index)
@@ -2510,13 +2520,24 @@ u8 *load_gamepak_page(u32 physical_index)
   if (physical_index >= rom_blocks)
     physical_index %= rom_blocks;
 
+  s16 resident = gamepak_page_slot[physical_index];
+  if (resident >= 0)
+  {
+    u8 *location = gamepak_slot_ptr(resident);
+    map_rom_entry(read, physical_index, location, rom_blocks);
+    // GPIO registers are not updated while page 0 is unmapped
+    if (physical_index == 0)
+      update_gpio_romregs();
+    return location;
+  }
+
+
   u32 entry = evict_gamepak_page();
-  u32 block_idx = entry / 32;
-  u32 block_off = entry % 32;
-  u8 *swap_location = &gamepak_buffers[block_idx][32 * 1024 * block_off];
+  u8 *swap_location = gamepak_slot_ptr(entry);
 
   // Fill in the entry
-  gamepak_blk_queue[entry].phy_rom = physical_index;
+  gamepak_slot_page[entry] = physical_index;
+  gamepak_page_slot[physical_index] = entry;
 
   u32 file_index = physical_index;
   if (gamepak_mirror_1m && gamepak_file_blocks != 0)
@@ -2539,12 +2560,21 @@ u8 *load_gamepak_page(u32 physical_index)
   return swap_location;
 }
 
+static unsigned gamepak_buffer_limit = ROM_BUFFER_SIZE;
+
+bool gpsp_set_rom_buffer_limit(unsigned mib)
+{
+  if (!mib || mib > ROM_BUFFER_SIZE || mib > 32 || gamepak_buffer_count)
+    return false;
+  gamepak_buffer_limit = mib;
+  return true;
+}
+
 void init_gamepak_buffer(void)
 {
-  unsigned i;
-  // Try to allocate up to 32 blocks of 1MB each
+  // Allocate 1 MiB blocks up to the frontend's limit.
   gamepak_buffer_count = 0;
-  while (gamepak_buffer_count < ROM_BUFFER_SIZE)
+  while (gamepak_buffer_count < gamepak_buffer_limit)
   {
     void *ptr = malloc(gamepak_buffer_blocksize);
     if (!ptr)
@@ -2553,14 +2583,30 @@ void init_gamepak_buffer(void)
   }
 
   // Initialize the memory map structure
-  for (i = 0; i < 1024; i++)
-  {
-    gamepak_blk_queue[i].next_lru = (u16)(i + 1);
-    gamepak_blk_queue[i].phy_rom = -1;
-  }
+  reset_gamepak_slots();
+}
 
-  gamepak_lru_head = 0;
-  gamepak_lru_tail = 32 * gamepak_buffer_count - 1;
+// Keeps only the 1MB blocks a ROM of rom_bytes needs (at least one, at most
+// gamepak_buffer_limit), so small games leave the rest of the memory free.
+static void fit_gamepak_buffer(u32 rom_bytes)
+{
+  u32 need = (rom_bytes + gamepak_buffer_blocksize - 1) /
+             gamepak_buffer_blocksize;
+  if (need < 1)
+    need = 1;
+  if (need > gamepak_buffer_limit)
+    need = gamepak_buffer_limit;
+
+  while (gamepak_buffer_count > need)
+    free(gamepak_buffers[--gamepak_buffer_count]);
+  while (gamepak_buffer_count < need)
+  {
+    void *ptr = malloc(gamepak_buffer_blocksize);
+    if (!ptr)
+      break;
+    gamepak_buffers[gamepak_buffer_count++] = (u8*)ptr;
+  }
+  reset_gamepak_slots();
 }
 
 bool gamepak_must_swap(void)
@@ -2953,6 +2999,8 @@ static s32 load_gamepak_raw(const char *name)
       gamepak_mini_rom = (u8*)malloc(gamepak_size);
       if (gamepak_mini_rom)
       {
+        // The mini ROM has its own image; only block 0 holds the header
+        fit_gamepak_buffer(1);
         u32 read_len = (u32)filestream_read(gamepak_file_large, gamepak_mini_rom, raw_size);
         if (read_len < raw_size)
           memset(gamepak_mini_rom + read_len, 0xFF, raw_size - read_len);
@@ -2992,6 +3040,7 @@ static s32 load_gamepak_raw(const char *name)
     }
 
     // Load stuff in 1MB chunks
+    fit_gamepak_buffer(raw_size);
     u32 buf_blocks = (raw_size + gamepak_buffer_blocksize-1) / (gamepak_buffer_blocksize);
     u32 rom_blocks = gamepak_size >> 15;
     u32 ldblks = buf_blocks < gamepak_buffer_count ?
@@ -3010,6 +3059,7 @@ static s32 load_gamepak_raw(const char *name)
 
     // Unmap the ROM space since we will re-map it now
     map_null(read, 0x8000000, 0xD000000);
+    reset_gamepak_slots();
 
     // Proceed to read the whole ROM or as much as possible.
     for (i = 0; i < ldblks; i++)
@@ -3024,8 +3074,8 @@ static s32 load_gamepak_raw(const char *name)
       {
         u32 phyn = i*32 + j;
         u8* blkptr = &gamepak_buffers[i][32 * 1024 * j];
-        u32 entry = evict_gamepak_page();
-        gamepak_blk_queue[entry].phy_rom = phyn;
+        gamepak_slot_page[i*32 + j] = phyn;
+        gamepak_page_slot[phyn] = i*32 + j;
         // Map it to the read handlers now
         map_rom_entry(read, phyn, blkptr, rom_blocks);
       }
@@ -3051,54 +3101,6 @@ static bool rom_has_signature(const u8 *rom, u32 rom_size, const char *sig)
   }
 
   return false;
-}
-
-enum
-{
-  ROM_SIG_EEPROM  = (1 << 0),
-  ROM_SIG_SRAM    = (1 << 1),
-  ROM_SIG_FLASH1M = (1 << 2),
-  ROM_SIG_FLASH5  = (1 << 3)
-};
-
-static u32 rom_scan_signatures_in_memory(void)
-{
-  u32 found = 0;
-  u32 size_left = gamepak_size;
-  u32 buf_idx = 0;
-
-  const char *sig_eeprom = "EEPROM_V";
-  const char *sig_sram = "SRAM_V";
-  const char *sig_flash1m = "FLASH1M_V";
-  const char *sig_flash512 = "FLASH512_V";
-  const char *sig_flash = "FLASH_V";
-
-  while (size_left > 0 && buf_idx < gamepak_buffer_count)
-  {
-    u32 chunk_size = (size_left > gamepak_buffer_blocksize) ? gamepak_buffer_blocksize : size_left;
-    u8 *chunk = gamepak_buffers[buf_idx];
-    u32 i;
-
-    for (i = 0; i < chunk_size - 10; i += 4)
-    {
-      if (chunk[i] == 'E' && !(found & ROM_SIG_EEPROM) && memcmp(&chunk[i], sig_eeprom, 8) == 0) found |= ROM_SIG_EEPROM;
-      else if (chunk[i] == 'S' && !(found & ROM_SIG_SRAM) && memcmp(&chunk[i], sig_sram, 6) == 0) found |= ROM_SIG_SRAM;
-      else if (chunk[i] == 'F' && !(found & ROM_SIG_FLASH1M) && memcmp(&chunk[i], sig_flash1m, 9) == 0) found |= ROM_SIG_FLASH1M;
-      else if (chunk[i] == 'F' && !(found & ROM_SIG_FLASH5)) {
-        if (memcmp(&chunk[i], sig_flash512, 10) == 0 || memcmp(&chunk[i], sig_flash, 7) == 0)
-          found |= ROM_SIG_FLASH5;
-      }
-    }
-
-    if ((found & (ROM_SIG_EEPROM | ROM_SIG_SRAM | ROM_SIG_FLASH1M | ROM_SIG_FLASH5)) ==
-        (ROM_SIG_EEPROM | ROM_SIG_SRAM | ROM_SIG_FLASH1M | ROM_SIG_FLASH5))
-      break;
-
-    size_left -= chunk_size;
-    buf_idx++;
-  }
-
-  return found;
 }
 
 static bool rom_is_pokemon_family(const u8 *rom)
@@ -3166,7 +3168,23 @@ static void detect_backup_subcircuit(const u8 *rom, u32 rom_size)
   }
 
   if (!has_eeprom && !has_sram && !has_flash1m && !has_flash5)
-    file_sigs = rom_scan_signatures_in_memory();
+  {
+    struct rom_scan_result scan = rom_scan_signatures(gamepak_file_large,
+        gamepak_buffers, gamepak_buffer_count, gamepak_buffer_blocksize);
+    file_sigs = scan.signatures;
+    if (scan.status != ROM_SCAN_OK)
+    {
+      const char *reason = "file size";
+      if (scan.status == ROM_SCAN_NO_MEMORY)
+        reason = "allocation";
+      else if (scan.status == ROM_SCAN_SEEK_ERROR)
+        reason = "seek";
+      else if (scan.status == ROM_SCAN_READ_ERROR)
+        reason = "read";
+      fprintf(stderr, "gpSP warning: ROM signature scan incomplete (%s); "
+          "using partial signatures and runtime backup detection.\n", reason);
+    }
+  }
 
   if (has_eeprom ||
       (file_sigs & ROM_SIG_EEPROM))

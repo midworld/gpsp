@@ -10,5 +10,4 @@ else ifneq ($(SANITIZE),0)
 $(error SANITIZE must be 0 or 1)
 endif
 BUILD := build$(TEST_SUFFIX)
-TEST_HEADERS := $(wildcard ../../*.h ../../include/*.h ../../riscv/*.h *.h) \
-    ../rv32-rvc.h ../rv32-zb.mk
+TEST_HEADERS := $(wildcard ../../*.h ../../include/*.h ../../riscv/*.h *.h)
