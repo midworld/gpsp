@@ -35,13 +35,26 @@ SOURCES_C := $(CORE_DIR)/main.c \
 # Accept both environment settings and make command-line assignments.
 GPSP_ISA_OPTIONS := GPSP_RV32_USE_ZBA GPSP_RV32_USE_ZBB GPSP_RV32_USE_ZBS \
                     GPSP_RV32_USE_RVC GPSP_RV32_USE_ZCB
-GPSP_BOOL_OPTIONS := $(GPSP_ISA_OPTIONS) GPSP_AFFINE_PIE
+GPSP_BENCH_OPTIONS := GPSP_BENCHMARK_PHASE_WORK GPSP_BENCHMARK_INSTRET \
+                      GPSP_BENCHMARK_JIT_DETAIL GPSP_BENCHMARK_JIT_LOOKUP \
+                      GPSP_BENCHMARK_JIT_MISS_CLASS GPSP_BENCHMARK_JIT_CODE_BYTES \
+                      GPSP_BENCHMARK_VIDEO_DETAIL GPSP_BENCHMARK_RAM_CODE
+GPSP_BOOL_OPTIONS := $(GPSP_ISA_OPTIONS) $(GPSP_BENCH_OPTIONS) \
+                     GPSP_BENCHMARK \
+                     GPSP_AFFINE_PIE
 $(foreach option,$(GPSP_BOOL_OPTIONS),$(if $(filter-out 0 1,$($(option)))$(word 2,$($(option))),$(error $(option) must be 0 or 1)))
 
 DEFINES += $(foreach option,$(GPSP_ISA_OPTIONS),$(if $(strip $($(option))),-D$(option)=$($(option))))
 GPSP_SIZE_OPTIONS := GPSP_RV32_ROM_CACHE_KIB GPSP_RV32_RAM_CACHE_KIB \
                      GPSP_RV32_CODE_CHUNK_KIB ROM_BUFFER_SIZE
 DEFINES += $(foreach option,$(GPSP_SIZE_OPTIONS),$(if $(strip $($(option))),-D$(option)=$($(option))))
+
+ifneq ($(filter 1,$(foreach option,$(GPSP_BENCH_OPTIONS),$($(option)))),)
+  ifneq ($(GPSP_BENCHMARK),1)
+    $(error Benchmark detail options require GPSP_BENCHMARK=1)
+  endif
+endif
+DEFINES += $(foreach option,$(GPSP_BENCH_OPTIONS),$(if $(filter 1,$($(option))),-D$(option)=1))
 
 ifeq ($(HAVE_DYNAREC), 1)
   SOURCES_C += $(CORE_DIR)/cpu_threaded.c
@@ -89,6 +102,11 @@ ifeq ($(platform), rv32)
                  $(CORE_DIR)/riscv/rv32_thumb_ram_helper.S \
                  $(CORE_DIR)/riscv/rv32_thumb_ram_store.S \
                  $(CORE_DIR)/riscv/rv32_thumb_exit_shared.S
+endif
+
+ifeq ($(GPSP_BENCHMARK), 1)
+  DEFINES += -DGPSP_BENCHMARK=1
+  SOURCES_C += $(CORE_DIR)/gpsp_benchmark_timing.c
 endif
 
 # Requires an assembler and CPU with the XespV extension.

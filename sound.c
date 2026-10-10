@@ -19,6 +19,9 @@
 
 
 #include "common.h"
+#if defined(GPSP_BENCHMARK)
+#include "gpsp_benchmark_timing.h"
+#endif
 
 direct_sound_struct direct_sound_channel[2];
 gbc_sound_struct gbc_sound_channel[4];
@@ -67,7 +70,13 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
 
   fixed8_24 fifo_fractional = ds->fifo_fractional;
   u32 buffer_index = ds->buffer_index;
+#if defined(GPSP_BENCHMARK_PHASE_WORK)
+  u32 start_buffer_index = buffer_index;
+#endif
   s32 current_sample, next_sample;
+#if defined(GPSP_BENCHMARK)
+  gpsp_benchmark_timing_enter(GPSP_BENCHMARK_SOUND);
+#endif
 
   /* 8-bit FIFO samples placed at full 16-bit scale; x256 is exact, so no
    * precision is created or lost here, but the interpolator below now
@@ -156,6 +165,14 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
     if(dma[2].direct_sound_channel == channel)
       dma_transfer(2, &ret);
   }
+#if defined(GPSP_BENCHMARK)
+#if defined(GPSP_BENCHMARK_PHASE_WORK)
+  gpsp_benchmark_timing_sound_direct(
+   (buffer_index - start_buffer_index) & BUFFER_SIZE_MASK,
+   sample_status != DIRECT_SOUND_INACTIVE);
+#endif
+  gpsp_benchmark_timing_leave();
+#endif
   return ret;
 }
 
@@ -423,6 +440,9 @@ void render_gbc_sound()
   u16 sound_status = read_ioreg(REG_SOUNDCNT_X) & 0xFFF0;
   const s8 *sample_data;
   u32 tick_delta = cpu_ticks - gbc_sound_last_cpu_ticks;
+#if defined(GPSP_BENCHMARK)
+  gpsp_benchmark_timing_enter(GPSP_BENCHMARK_SOUND);
+#endif
   /* tick_delta * sound_frequency / GBC_BASE_RATE, in 16.16 fixed point.
    * Done in 64-bit integer so the result is exact and bit-reproducible
    * across toolchains/arches (the old float form depended on x87 vs SSE
@@ -432,7 +452,15 @@ void render_gbc_sound()
   fixed16_16 buffer_ticks = (fixed16_16)
    ((((u64)tick_delta * sound_frequency) << 16) / GBC_BASE_RATE_INT);
   if (!tick_delta)
+  {
+#if defined(GPSP_BENCHMARK)
+#if defined(GPSP_BENCHMARK_PHASE_WORK)
+    gpsp_benchmark_timing_sound_psg(0);
+#endif
+    gpsp_benchmark_timing_leave();
+#endif
     return;
+  }
 
   gbc_update_count++;
   gbc_sound_partial_ticks += fp16_16_fractional_part(buffer_ticks);
@@ -521,6 +549,12 @@ void render_gbc_sound()
   gbc_sound_last_cpu_ticks = cpu_ticks;
   gbc_sound_buffer_index =
    (gbc_sound_buffer_index + (buffer_ticks * 2)) % BUFFER_SIZE;
+#if defined(GPSP_BENCHMARK)
+#if defined(GPSP_BENCHMARK_PHASE_WORK)
+  gpsp_benchmark_timing_sound_psg(buffer_ticks);
+#endif
+  gpsp_benchmark_timing_leave();
+#endif
 }
 
 // Special thanks to blarrg for the LSFR frequency used in Meridian, as posted

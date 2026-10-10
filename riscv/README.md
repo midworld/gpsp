@@ -23,6 +23,12 @@
   Use positive cache sizes that are multiples of the chunk size. Chunks must
   be powers of two; each arena supports at most 64 chunks.
 - `ROM_BUFFER_SIZE=32`: maximum ROM buffer in MiB, from 1 to 32.
+- `GPSP_BENCHMARK=1`: timing counters. Optional detail switches:
+  `GPSP_BENCHMARK_PHASE_WORK`, `GPSP_BENCHMARK_INSTRET`,
+  `GPSP_BENCHMARK_JIT_DETAIL`, `GPSP_BENCHMARK_JIT_LOOKUP`,
+  `GPSP_BENCHMARK_JIT_MISS_CLASS`, `GPSP_BENCHMARK_JIT_CODE_BYTES`,
+  `GPSP_BENCHMARK_VIDEO_DETAIL`, `GPSP_BENCHMARK_RAM_CODE`.
+  Detail switches require `GPSP_BENCHMARK=1`.
 - `GPSP_AFFINE_PIE=1`: optional XespV affine helper. Requires a supporting
   assembler and CPU, plus frontend task/context preparation.
 
@@ -35,4 +41,6 @@
 - Allocate executable memory with the requested alignment and free it through
   the same provider. Publish each written range before instruction fetch.
 - Allocation failure can reduce the cache or select the interpreter fallback.
+- RV32 paging and benchmark counters read cycle CSRs. The execution environment
+  must allow these reads; instruction counters also need `instret` access.
 - See [tests](../tests/README.md) for native and assembler checks.

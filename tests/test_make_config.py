@@ -39,9 +39,12 @@ settings = {
     "GPSP_RV32_USE_ZCB": "1",
     "GPSP_RV32_ROM_CACHE_KIB": "1024", "GPSP_RV32_RAM_CACHE_KIB": "512",
     "GPSP_RV32_CODE_CHUNK_KIB": "128",
-    "ROM_BUFFER_SIZE": "4",
+    "ROM_BUFFER_SIZE": "4", "GPSP_BENCHMARK": "1",
+    "GPSP_BENCHMARK_PHASE_WORK": "1", "GPSP_BENCHMARK_INSTRET": "1",
+    "GPSP_BENCHMARK_JIT_DETAIL": "1", "GPSP_BENCHMARK_JIT_LOOKUP": "1",
+    "GPSP_BENCHMARK_JIT_MISS_CLASS": "1", "GPSP_BENCHMARK_JIT_CODE_BYTES": "1",
+    "GPSP_BENCHMARK_VIDEO_DETAIL": "1", "GPSP_BENCHMARK_RAM_CODE": "1",
     "GPSP_AFFINE_PIE": "1",
-
 }
 for commands in (build(env=settings), build(args=[f"{k}={v}" for k, v in settings.items()])):
     for name, value in settings.items():
@@ -56,12 +59,13 @@ contains(commands, "-DGPSP_RV32_JIT=1")
 assert any("rv32_block_runtime.cc" in command[-1] for command in commands)
 
 commands = build(env={"RV32_ARCH": "rv32im_zicsr_zifencei", "RV32_ABI": "ilp32",
-                      })
+                      "GPSP_BENCHMARK": "0", "GPSP_BENCHMARK_JIT_DETAIL": "0"})
 contains(commands, "-march=rv32im_zicsr_zifencei")
 contains(commands, "-mabi=ilp32")
 contains(commands, "-DGPSP_BENCHMARK=1", False)
 contains(commands, "-DGPSP_BENCHMARK_JIT_DETAIL=0", False)
-for args in (["GPSP_RV32_USE_RVC=yes"], ["GPSP_RV32_USE_ZBB=1 0"]):
+for args in (["GPSP_RV32_USE_RVC=yes"], ["GPSP_RV32_USE_ZBB=1 0"],
+             ["GPSP_BENCHMARK=0", "GPSP_BENCHMARK_JIT_DETAIL=1"]):
     build(args=args, succeeds=False)
 
 # Exported target settings must not introduce target sources into host fixtures.

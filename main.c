@@ -19,6 +19,9 @@
 
 #include "common.h"
 #include <ctype.h>
+#if defined(GPSP_BENCHMARK)
+#include "gpsp_benchmark_timing.h"
+#endif
 
 timer_type timer[4];
 
@@ -70,6 +73,9 @@ void rand_seed(u32 data) {
 static unsigned update_timers(irq_type *irq_raised, unsigned completed_cycles)
 {
    unsigned i, ret = 0;
+#if defined(GPSP_BENCHMARK)
+   gpsp_benchmark_timing_enter(GPSP_BENCHMARK_TIMER);
+#endif
    for (i = 0; i < 4; i++)
    {
       if(timer[i].status == TIMER_INACTIVE)
@@ -106,6 +112,9 @@ static unsigned update_timers(irq_type *irq_raised, unsigned completed_cycles)
 
       timer[i].count += (timer[i].reload << timer[i].prescale);
    }
+#if defined(GPSP_BENCHMARK)
+   gpsp_benchmark_timing_leave();
+#endif
    return ret;
 }
 
@@ -159,6 +168,9 @@ u32 function_cc update_gba(int remaining_cycles)
   int dma_cycles;
   // Later iterations only run while the CPU is halted
   u32 halted_pass = 0;
+#if defined(GPSP_BENCHMARK)
+  gpsp_benchmark_timing_enter(GPSP_BENCHMARK_SCHED);
+#endif
   trace_update_gba(remaining_cycles);
 
   remaining_cycles = MAX(remaining_cycles, -64);
@@ -365,6 +377,9 @@ u32 function_cc update_gba(int remaining_cycles)
     cpu_stall_cycles -= dma_cycles;
   }
 
+#if defined(GPSP_BENCHMARK)
+  gpsp_benchmark_timing_leave();
+#endif
   return (execute_cycles - dma_cycles) | changed_pc | frame_complete;
 }
 

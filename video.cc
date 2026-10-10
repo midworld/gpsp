@@ -20,7 +20,38 @@
 
 extern "C" {
   #include "common.h"
+  #include "gpsp_frame_stats.h"
   #include "gpsp_screen.h"
+#if defined(GPSP_BENCHMARK)
+  #include "gpsp_benchmark_timing.h"
+#endif
+}
+
+#if defined(__riscv) && !defined(GPSP_BENCHMARK)
+/* Always counted: the frontend logs render time in slow frames. */
+static u32 render_cycles;
+
+static inline u32 render_cycle_count(void)
+{
+  u32 cycles;
+  __asm__ volatile("rdcycle %0" : "=r"(cycles));
+  return cycles;
+}
+#define render_cycles_begin() u32 render_start = render_cycle_count()
+#define render_cycles_end() \
+  (render_cycles += render_cycle_count() - render_start)
+#else
+#define render_cycles_begin() ((void)0)
+#define render_cycles_end() ((void)0)
+#endif
+
+uint32_t gpsp_video_render_cycles(void)
+{
+#if defined(__riscv) && !defined(GPSP_BENCHMARK)
+  return render_cycles;
+#else
+  return 0;
+#endif
 }
 
 u16* gba_screen_pixels = NULL;
@@ -147,11 +178,17 @@ static inline s32 signext28(u32 value)
 
 void video_reload_counters()
 {
+#if defined(GPSP_BENCHMARK)
+  gpsp_benchmark_timing_enter(GPSP_BENCHMARK_VIDEO_SETUP);
+#endif
   /* This happens every Vblank */
   affine_reference_x[0] = signext28(read_ioreg32(REG_BG2X_L));
   affine_reference_y[0] = signext28(read_ioreg32(REG_BG2Y_L));
   affine_reference_x[1] = signext28(read_ioreg32(REG_BG3X_L));
   affine_reference_y[1] = signext28(read_ioreg32(REG_BG3Y_L));
+#if defined(GPSP_BENCHMARK)
+  gpsp_benchmark_timing_leave();
+#endif
 }
 
 // A zero nibble (4bpp) or byte (8bpp) marks a transparent pixel. These test
@@ -1927,6 +1964,9 @@ typedef enum
 // Bit 11 is set if the pixel belongs to a ST-object
 template <blendtype bldtype, bool st_objs>
 static void merge_blend(u32 start, u32 end, u16 *dst, u32 *src) {
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+  uint32_t detail_start = gpsp_benchmark_video_detail_now();
+#endif
   u32 bldalpha = read_ioreg(REG_BLDALPHA);
   u32 brightf = MIN(16, read_ioreg(REG_BLDY) & 0x1F);
   u32 blend_a = MIN(16, (bldalpha >> 0) & 0x1F);
@@ -2006,11 +2046,18 @@ static void merge_blend(u32 start, u32 end, u16 *dst, u32 *src) {
       }
     }
   }
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+  gpsp_benchmark_video_detail_add(GPSP_BENCHMARK_VIDEO_EFFECTS,
+    gpsp_benchmark_video_detail_now() - detail_start);
+#endif
 }
 
 // Applies brighten/darken effect to a bunch of color-indexed pixels.
 template <blendtype bldtype>
 static void merge_brightness(u32 start, u32 end, u16 *srcdst) {
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+  uint32_t detail_start = gpsp_benchmark_video_detail_now();
+#endif
   u32 brightness = MIN(16, read_ioreg(REG_BLDY) & 0x1F);
 
   while (start < end) {
@@ -2028,6 +2075,10 @@ static void merge_brightness(u32 start, u32 end, u16 *srcdst) {
 
     srcdst[start++] = pixcol;
   }
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+  gpsp_benchmark_video_detail_add(GPSP_BENCHMARK_VIDEO_EFFECTS,
+    gpsp_benchmark_video_detail_now() - detail_start);
+#endif
 }
 
 // Fills a segment using the backdrop color (in the right mode).
@@ -2096,6 +2147,9 @@ void tile_render_layers(u32 start, u32 end, dsttype *dst_ptr, u32 enabled_layers
       if (!base_done)
         fill_line_background<bgmode, dsttype>(start, end, dst_ptr);
 
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+      uint32_t detail_start = gpsp_benchmark_video_detail_now();
+#endif
       // Optimization: skip blending mode if no blending can happen to this layer
       if (objmode == STCKCOLOR && can_skip_blend)
         render_scanline_objs<dsttype, INDXCOLOR>(
@@ -2103,6 +2157,10 @@ void tile_render_layers(u32 start, u32 end, dsttype *dst_ptr, u32 enabled_layers
       else
         render_scanline_objs<dsttype, objmode>(
           layer & 0x3, start, end, dst_ptr, &palette_ram_converted[0x100]);
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+      gpsp_benchmark_video_detail_add(GPSP_BENCHMARK_VIDEO_OBJ_LAYER,
+        gpsp_benchmark_video_detail_now() - detail_start);
+#endif
 
       base_done = 1;
     }
@@ -2113,6 +2171,9 @@ void tile_render_layers(u32 start, u32 end, dsttype *dst_ptr, u32 enabled_layers
       bool is_affine = (video_mode >= 1) && (layer >= 2);
       u32 fnidx = (base_done) | (is_affine ? 2 : 0);
 
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+      uint32_t detail_start = gpsp_benchmark_video_detail_now();
+#endif
       // Can optimize rendering if no blending can really happen.
       // If stack mode, no blending and not base layer, we might speed up a bit
       if (bgmode == STCKCOLOR && can_skip_blend) {
@@ -2132,6 +2193,11 @@ void tile_render_layers(u32 start, u32 end, dsttype *dst_ptr, u32 enabled_layers
         };
         rdfns[fnidx](layer, start, end, dst_ptr, palette_ram_converted);
       }
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+      gpsp_benchmark_video_detail_add(
+        is_affine ? GPSP_BENCHMARK_VIDEO_AFFINE_BG : GPSP_BENCHMARK_VIDEO_TEXT_BG,
+        gpsp_benchmark_video_detail_now() - detail_start);
+#endif
 
       base_done = 1;
     }
@@ -2354,7 +2420,14 @@ static void bitmap_render_layers(
       !(layer_order[0] & 0x04) && (enable_flags & 0x04) &&
       !(s16)read_ioreg(REG_BG2PC) && (s16)read_ioreg(REG_BG2PA) == 256)
   {
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+    uint32_t detail_start = gpsp_benchmark_video_detail_now();
+#endif
     render_mode4_blit_backdrop(start, end, (u16 *)scanline);
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+    gpsp_benchmark_video_detail_add(GPSP_BENCHMARK_VIDEO_BITMAP_BG,
+      gpsp_benchmark_video_detail_now() - detail_start);
+#endif
     first_layer = 1;
   }
   else
@@ -2369,6 +2442,9 @@ static void bitmap_render_layers(
       if (enable_flags & 0x10) {
         bool can_skip_blend = !has_trans_obj && !objlayer_is_1st_tgt;
 
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+        uint32_t detail_start = gpsp_benchmark_video_detail_now();
+#endif
         // Optimization: skip blending mode if no blending can happen to this layer
         if (objmode == STCKCOLOR && can_skip_blend)
           render_scanline_objs<dsttype, INDXCOLOR>(
@@ -2376,6 +2452,10 @@ static void bitmap_render_layers(
         else
           render_scanline_objs<dsttype, objmode>(
             current_layer & 3, start, end, scanline, &palette_ram_converted[0x100]);
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+        gpsp_benchmark_video_detail_add(GPSP_BENCHMARK_VIDEO_OBJ_LAYER,
+          gpsp_benchmark_video_detail_now() - detail_start);
+#endif
       }
     }
     else
@@ -2389,12 +2469,19 @@ static void bitmap_render_layers(
         const bitmap_layer_render_struct *rd =
           (bgmode == STCKCOLOR && can_skip_blend) ? idxm_rend : mode_rend;
 
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+        uint32_t detail_start = gpsp_benchmark_video_detail_now();
+#endif
         if (dy)
           rd->affine_render(start, end, scanline, palette_ram_converted);
         else if (dx == 256)
           rd->blit_render(start, end, scanline, palette_ram_converted);
         else
           rd->scale_render(start, end, scanline, palette_ram_converted);
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+        gpsp_benchmark_video_detail_add(GPSP_BENCHMARK_VIDEO_BITMAP_BG,
+          gpsp_benchmark_video_detail_now() - detail_start);
+#endif
       }
     }
   }
@@ -2590,6 +2677,10 @@ static const u8 active_layers[] = {
 
 void update_scanline(void)
 {
+#if defined(GPSP_BENCHMARK)
+  gpsp_benchmark_timing_enter(GPSP_BENCHMARK_SCANLINE);
+#endif
+  render_cycles_begin();
   u32 pitch = get_screen_pitch();
   u16 dispcnt = read_ioreg(REG_DISPCNT);
   u32 vcount = read_ioreg(REG_VCOUNT);
@@ -2597,26 +2688,60 @@ void update_scanline(void)
   u32 video_mode = dispcnt & 0x07;
 
   if(skip_next_frame)
+  {
+    render_cycles_end();
+#if defined(GPSP_BENCHMARK)
+    gpsp_benchmark_timing_leave();
+#endif
     return;
+  }
+
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+  uint32_t phase_start;
+  gpsp_benchmark_video_detail_line(video_mode, dispcnt & 0x80,
+                                   dispcnt & 0xE000);
+#endif
 
   // If OAM has been modified since the last scanline has been updated then
   // reorder and reprofile the OBJ lists.
   if(reg[OAM_UPDATED])
   {
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+    phase_start = gpsp_benchmark_video_detail_now();
+#endif
     order_obj(video_mode);
     reg[OAM_UPDATED] = 0;
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+    gpsp_benchmark_video_detail_add(GPSP_BENCHMARK_VIDEO_OAM,
+      gpsp_benchmark_video_detail_now() - phase_start);
+#endif
   }
 
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+  phase_start = gpsp_benchmark_video_detail_now();
+#endif
   order_layers((dispcnt >> 8) & active_layers[video_mode], vcount);
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+  gpsp_benchmark_video_detail_add(GPSP_BENCHMARK_VIDEO_LAYERS,
+    gpsp_benchmark_video_detail_now() - phase_start);
+  phase_start = gpsp_benchmark_video_detail_now();
+#endif
 
   // If the screen is in in forced blank draw pure white.
   if(dispcnt & 0x80)
     memset(screen_offset, 0xff, 240*sizeof(u16));
   else
     render_scanline_window(screen_offset);
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+  gpsp_benchmark_video_detail_add(GPSP_BENCHMARK_VIDEO_DRAW,
+    gpsp_benchmark_video_detail_now() - phase_start);
+#endif
 
   // Mode 0 does not use any affine params at all.
   if (video_mode) {
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+    phase_start = gpsp_benchmark_video_detail_now();
+#endif
     // Account for vertical mosaic effect, by correcting affine references.
     const u32 bgmosv = ((read_ioreg(REG_MOSAIC) >> 4) & 0xF) + 1;
 
@@ -2639,5 +2764,13 @@ void update_scanline(void)
       affine_reference_x[1] += (s16)read_ioreg(REG_BG3PB);
       affine_reference_y[1] += (s16)read_ioreg(REG_BG3PD);
     }
+#if defined(GPSP_BENCHMARK) && defined(GPSP_BENCHMARK_VIDEO_DETAIL)
+    gpsp_benchmark_video_detail_add(GPSP_BENCHMARK_VIDEO_AFFINE,
+      gpsp_benchmark_video_detail_now() - phase_start);
+#endif
   }
+  render_cycles_end();
+#if defined(GPSP_BENCHMARK)
+  gpsp_benchmark_timing_leave();
+#endif
 }

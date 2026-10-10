@@ -20,7 +20,14 @@
 #include "common.h"
 #include "gpsp_memory.h"
 #include "streams/file_stream.h"
+#include "gpsp_frame_stats.h"
 #include "gba_rom_scan.h"
+#if defined(__riscv)
+#include <stdatomic.h>
+#endif
+#if defined(GPSP_BENCHMARK)
+#include "gpsp_benchmark_timing.h"
+#endif
 #if defined(GPSP_RV32_JIT)
 #include "riscv/rv32_ram_units.h"
 #include "riscv/rv32_thumb_memory.h"
@@ -433,6 +440,45 @@ u32 gamepak_sticky_bit[1024/32];
 // pages from, so there's no slowdown with opening and closing the file
 // a lot.
 RFILE *gamepak_file_large = NULL;
+
+#if defined(__riscv)
+/* Frontend stats: ROM page loads from the file, loads of pages that were
+   resident before, remaps of pages still in a slot, and the CPU cycles
+   spent loading. */
+static _Atomic(u32) rom_page_loads;
+static _Atomic(u32) rom_page_reloads;
+static _Atomic(u32) rom_page_remaps;
+static _Atomic(u32) rom_page_cycles;
+static u32 rom_page_seen[1024 / 32];
+
+static inline u32 rom_page_cycle_count(void)
+{
+  u32 cycles;
+  __asm__ volatile("rdcycle %0" : "=r"(cycles));
+  return cycles;
+}
+
+static inline void rom_page_mark_seen(u32 idx)
+{
+  rom_page_seen[idx >> 5] |= 1U << (idx & 31);
+}
+#endif
+
+void gpsp_rom_page_stats(uint32_t *loads, uint32_t *reloads,
+                         uint32_t *remaps, uint32_t *cycles)
+{
+#if defined(__riscv)
+  *loads = atomic_load_explicit(&rom_page_loads, memory_order_relaxed);
+  *reloads = atomic_load_explicit(&rom_page_reloads, memory_order_relaxed);
+  *remaps = atomic_load_explicit(&rom_page_remaps, memory_order_relaxed);
+  *cycles = atomic_load_explicit(&rom_page_cycles, memory_order_relaxed);
+#else
+  *loads = 0;
+  *reloads = 0;
+  *remaps = 0;
+  *cycles = 0;
+#endif
+}
 
 // Writes to these respective locations should trigger an update
 // so the related subsystem may react to it.
@@ -2556,6 +2602,12 @@ cpu_alert_type dma_transfer(unsigned dma_chan, int *usedcycles)
   cpu_alert_type ret = CPU_ALERT_NONE;
   u32 tfsizes = dmach->length_type == DMA_16BIT ? 1 : 2;
   u32 byte_length = dmach->length << tfsizes;
+#if defined(GPSP_BENCHMARK)
+  gpsp_benchmark_timing_enter(GPSP_BENCHMARK_DMA);
+#if defined(GPSP_BENCHMARK_PHASE_WORK)
+  gpsp_benchmark_timing_dma_bytes(byte_length);
+#endif
+#endif
 
   // Divide the DMA transaction into up to three transactions depending on
   // the source and destination memory regions.
@@ -2611,6 +2663,9 @@ cpu_alert_type dma_transfer(unsigned dma_chan, int *usedcycles)
 #if defined(GPSP_RV32_JIT)
   if (ret & CPU_ALERT_SMC)
     gpsp_rv32_add_memory_alert(CPU_ALERT_SMC);
+#endif
+#if defined(GPSP_BENCHMARK)
+  gpsp_benchmark_timing_leave();
 #endif
   return ret;
 }
@@ -2707,6 +2762,9 @@ u8 *load_gamepak_page(u32 physical_index)
   if (resident >= 0)
   {
     u8 *location = gamepak_slot_ptr(resident);
+#if defined(__riscv)
+    atomic_fetch_add_explicit(&rom_page_remaps, 1, memory_order_relaxed);
+#endif
     map_rom_entry(read, physical_index, location, rom_blocks);
     // GPIO registers are not updated while page 0 is unmapped
     if (physical_index == 0)
@@ -2714,6 +2772,13 @@ u8 *load_gamepak_page(u32 physical_index)
     return location;
   }
 
+#if defined(__riscv)
+  u32 load_start = rom_page_cycle_count();
+  atomic_fetch_add_explicit(&rom_page_loads, 1, memory_order_relaxed);
+  if (rom_page_seen[physical_index >> 5] & (1U << (physical_index & 31)))
+    atomic_fetch_add_explicit(&rom_page_reloads, 1, memory_order_relaxed);
+  rom_page_mark_seen(physical_index);
+#endif
 
   u32 entry = evict_gamepak_page();
   u8 *swap_location = gamepak_slot_ptr(entry);
@@ -2740,6 +2805,10 @@ u8 *load_gamepak_page(u32 physical_index)
   if (physical_index == 0)
     update_gpio_romregs();
 
+#if defined(__riscv)
+  atomic_fetch_add_explicit(&rom_page_cycles,
+      rom_page_cycle_count() - load_start, memory_order_relaxed);
+#endif
   return swap_location;
 }
 
@@ -3248,6 +3317,9 @@ static s32 load_gamepak_raw(const char *name)
     // Unmap the ROM space since we will re-map it now
     map_null(read, 0x8000000, 0xD000000);
     reset_gamepak_slots();
+#if defined(__riscv)
+    memset(rom_page_seen, 0, sizeof(rom_page_seen));
+#endif
 
     // Proceed to read the whole ROM or as much as possible.
     for (i = 0; i < ldblks; i++)
@@ -3264,6 +3336,9 @@ static s32 load_gamepak_raw(const char *name)
         u8* blkptr = &gamepak_buffers[i][32 * 1024 * j];
         gamepak_slot_page[i*32 + j] = phyn;
         gamepak_page_slot[phyn] = i*32 + j;
+#if defined(__riscv)
+        rom_page_mark_seen(phyn);
+#endif
         // Map it to the read handlers now
         map_rom_entry(read, phyn, blkptr, rom_blocks);
       }
