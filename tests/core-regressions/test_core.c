@@ -194,7 +194,22 @@ static void test_sound(void)
     assert(retro_unserialize(state, sizeof(state)));
     assert(gbc_sound_channel[3].sample_index < u32_to_fp16_16(gbc_noise_wrap_half));
 
-    puts("sound: PASS (rate, state, length clock, noise wrap)");
+    for (u32 shift = 0; shift <= 1; shift++)
+    {
+        s16 samples[2];
+        sound_buffer_base = 0;
+        gbc_sound_buffer_index = 514;
+        sound_buffer[0] = 40000;
+        sound_buffer[1] = -40000;
+        sound_headroom_shift = shift;
+        assert(sound_read_samples(samples, 1) == 1);
+        assert(samples[0] == (shift ? 20000 : 32767));
+        assert(samples[1] == (shift ? -20000 : -32768));
+        assert(sound_buffer[0] == 0 && sound_buffer[1] == 0);
+        sound_flush_ring();
+        assert(sound_read_samples(samples, 1) == 0);
+    }
+    puts("sound: PASS (rate, state, length clock, noise wrap, headroom)");
 }
 
 int main(void)

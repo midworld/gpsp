@@ -25,6 +25,7 @@ gbc_sound_struct gbc_sound_channel[4];
 
 u32 sound_frequency = GBA_SOUND_FREQUENCY;
 u32 sound_freq_bits = 16;
+u32 sound_headroom_shift;
 
 u32 sound_on;
 /* Mix bus. Accumulates all six channels at full 16-bit output scale
@@ -893,7 +894,7 @@ u32 sound_read_samples(s16 *out, u32 frames)
    for(i = 0; i < samples_to_read; i++)
    {
       u32 source_index   = (sound_buffer_base + i) & BUFFER_SIZE_MASK;
-      s32 current_sample = sound_buffer[source_index];
+      s32 current_sample = sound_buffer[source_index] >> sound_headroom_shift;
 
       sound_buffer[source_index] = 0;
 

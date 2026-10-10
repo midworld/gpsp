@@ -35,6 +35,8 @@
  * buffer sizing). */
 extern u32 sound_frequency;
 extern u32 sound_freq_bits;
+/* Output attenuation in 6 dB steps, applied before the final clamp. */
+extern u32 sound_headroom_shift;
 
 /* PSG frequency steps in 16.16 sample-index units for the current rate.
  * Tone (ch 0/1): (131072/(2048-rate))*8 / f_s  ==  2^(36-b)/(2048-rate)

@@ -1061,6 +1061,14 @@ static void check_variables(bool started_from_load)
       sound_rate_configured = 1;
    }
 
+   var.key                = "gpsp_sound_headroom";
+   var.value              = 0;
+   sound_headroom_shift   = 0;
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
+       !strcmp(var.value, "6"))
+      sound_headroom_shift = 1;
+
 
    var.key                = "gpsp_frameskip";
    var.value              = 0;
