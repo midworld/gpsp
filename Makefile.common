@@ -35,7 +35,7 @@ SOURCES_C := $(CORE_DIR)/main.c \
 # Accept both environment settings and make command-line assignments.
 GPSP_ISA_OPTIONS := GPSP_RV32_USE_ZBA GPSP_RV32_USE_ZBB GPSP_RV32_USE_ZBS \
                     GPSP_RV32_USE_RVC GPSP_RV32_USE_ZCB
-GPSP_BOOL_OPTIONS := $(GPSP_ISA_OPTIONS)
+GPSP_BOOL_OPTIONS := $(GPSP_ISA_OPTIONS) GPSP_AFFINE_PIE
 $(foreach option,$(GPSP_BOOL_OPTIONS),$(if $(filter-out 0 1,$($(option)))$(word 2,$($(option))),$(error $(option) must be 0 or 1)))
 
 DEFINES += $(foreach option,$(GPSP_ISA_OPTIONS),$(if $(strip $($(option))),-D$(option)=$($(option))))
@@ -89,5 +89,11 @@ ifeq ($(platform), rv32)
                  $(CORE_DIR)/riscv/rv32_thumb_ram_helper.S \
                  $(CORE_DIR)/riscv/rv32_thumb_ram_store.S \
                  $(CORE_DIR)/riscv/rv32_thumb_exit_shared.S
+endif
+
+# Requires an assembler and CPU with the XespV extension.
+ifeq ($(GPSP_AFFINE_PIE), 1)
+  DEFINES += -DGPSP_AFFINE_PIE=1
+  SOURCES_ASM += $(CORE_DIR)/riscv/rv32_affine_pie.S
 endif
 

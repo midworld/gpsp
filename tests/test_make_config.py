@@ -40,11 +40,13 @@ settings = {
     "GPSP_RV32_ROM_CACHE_KIB": "1024", "GPSP_RV32_RAM_CACHE_KIB": "512",
     "GPSP_RV32_CODE_CHUNK_KIB": "128",
     "ROM_BUFFER_SIZE": "4",
+    "GPSP_AFFINE_PIE": "1",
 
 }
 for commands in (build(env=settings), build(args=[f"{k}={v}" for k, v in settings.items()])):
     for name, value in settings.items():
         contains(commands, f"-D{name}={value}")
+    assert any(command[-1].endswith("rv32_affine_pie.S") for command in commands)
 
 commands = build(env={"GPSP_RV32_USE_RVC": "1"}, args=["GPSP_RV32_USE_RVC=0"])
 contains(commands, "-DGPSP_RV32_USE_RVC=0")

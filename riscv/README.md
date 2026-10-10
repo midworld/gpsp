@@ -23,6 +23,8 @@
   Use positive cache sizes that are multiples of the chunk size. Chunks must
   be powers of two; each arena supports at most 64 chunks.
 - `ROM_BUFFER_SIZE=32`: maximum ROM buffer in MiB, from 1 to 32.
+- `GPSP_AFFINE_PIE=1`: optional XespV affine helper. Requires a supporting
+  assembler and CPU, plus frontend task/context preparation.
 
 ## Frontend contract
 

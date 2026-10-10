@@ -675,6 +675,89 @@ static inline void render_bdrop_pixel_8bpp(
     *dest_ptr = 0 | bg_comb;
 }
 
+#if defined(GPSP_AFFINE_PIE)
+// Vector address generation for rotated affine walks (see
+// riscv/rv32_affine_pie.S). Field order matches the assembly reads.
+typedef struct {
+  s32 x[4];
+  s32 y[4];
+  u32 mask, seven, tile_base, map_base;
+  s32 dx4, dy4;
+} __attribute__((aligned(16))) affine_pie_params;
+
+extern "C" void gpsp_affine_pie_addr(const affine_pie_params *params,
+  u32 count, u32 map_pitch, u32 *out);
+
+// Map byte addresses, then tile base plus in-tile offsets, per pixel.
+static u32 affine_pie_addr[2][256] __attribute__((aligned(16)));
+
+// The assembly uses these offsets and the 1024-byte output gap directly.
+static_assert(offsetof(affine_pie_params, y) == 16, "PIE params layout");
+static_assert(offsetof(affine_pie_params, mask) == 32, "PIE params layout");
+static_assert(offsetof(affine_pie_params, seven) == 36, "PIE params layout");
+static_assert(offsetof(affine_pie_params, tile_base) == 40, "PIE params layout");
+static_assert(offsetof(affine_pie_params, map_base) == 44, "PIE params layout");
+static_assert(offsetof(affine_pie_params, dx4) == 48, "PIE params layout");
+static_assert(offsetof(affine_pie_params, dy4) == 52, "PIE params layout");
+static_assert(alignof(affine_pie_params) == 16, "PIE loads need 16 bytes");
+static_assert(sizeof(affine_pie_addr[0]) == 1024, "PIE tile output offset");
+static_assert(sizeof(affine_pie_addr[0]) / 4 >= ((GBA_SCREEN_WIDTH + 3) & ~3),
+  "PIE output holds a padded scanline");
+
+// Draws cnt rotated pixels from (source_x, source_y). Each coordinate is
+// wrapped with the map mask, which also suits walks that stay inside it.
+template<typename dtype, rendtype rdtype, bool isbase>
+static inline void render_affine_pie(
+  s32 source_x, s32 source_y, s32 dx, s32 dy, u32 cnt, u32 map_size,
+  const u8 *map_base, const u8 *tile_base, dtype *dst_ptr,
+  u32 bg_comb, u32 px_comb, const u16 *pal
+) {
+  affine_pie_params params;
+  for (u32 k = 0; k < 4; k++) {
+    params.x[k] = source_x + (s32)k * dx;
+    params.y[k] = source_y + (s32)k * dy;
+  }
+  params.mask = (128 << map_size) - 1;
+  params.seven = 7;
+  params.tile_base = (u32)(uintptr_t)tile_base;
+  params.map_base = (u32)(uintptr_t)map_base;
+  params.dx4 = dx * 4;
+  params.dy4 = dy * 4;
+  gpsp_affine_pie_addr(&params, (cnt + 3) & ~3U, map_size + 4,
+    &affine_pie_addr[0][0]);
+
+  // Two pixels per step: their independent read chains interleave, which
+  // hides most load latency on this in-order core.
+  const u32 *map_addr = affine_pie_addr[0];
+  const u32 *tile_addr = affine_pie_addr[1];
+  u32 i = 0;
+  for (; i + 2 <= cnt; i += 2) {
+    u8 tile0 = *(const u8 *)(uintptr_t)map_addr[i];
+    u8 tile1 = *(const u8 *)(uintptr_t)map_addr[i + 1];
+    u8 pval0 = ((const u8 *)(uintptr_t)tile_addr[i])[tile0 * tile_size_8bpp];
+    u8 pval1 = ((const u8 *)(uintptr_t)tile_addr[i + 1])
+      [tile1 * tile_size_8bpp];
+    rend_pix_8bpp<dtype, rdtype, isbase>(dst_ptr++, pval0, bg_comb, px_comb, pal);
+    rend_pix_8bpp<dtype, rdtype, isbase>(dst_ptr++, pval1, bg_comb, px_comb, pal);
+  }
+  if (i < cnt) {
+    u8 tile = *(const u8 *)(uintptr_t)map_addr[i];
+    u8 pval = ((const u8 *)(uintptr_t)tile_addr[i])[tile * tile_size_8bpp];
+    rend_pix_8bpp<dtype, rdtype, isbase>(dst_ptr, pval, bg_comb, px_comb, pal);
+  }
+}
+
+// Steps from an inside coordinate before it leaves [0, size) (8.8 fixed).
+static inline u32 affine_steps_inside(s32 pos, s32 step, s32 size, u32 cnt)
+{
+  if (step > 0)
+    return MIN(cnt, (u32)((size - 1 - pos) / step) + 1);
+  if (step < 0)
+    return MIN(cnt, (u32)(pos / -step) + 1);
+  return cnt;
+}
+#endif
+
 typedef void (*affine_render_function) (
   u32 layer, u32 start, u32 cnt, const u8 *map_base,
   u32 map_size, const u8 *tile_base, void *dst_ptr,
@@ -709,6 +792,14 @@ static inline void render_affine_background(
   const u32 mosh = (mosaic ? (read_ioreg(REG_MOSAIC)) & 0xF : 0) + 1;
 
   if (wrap) {
+#if defined(GPSP_AFFINE_PIE)
+    // Vector code computes the addresses; the reads stay scalar.
+    if (rotate && !mosaic) {
+      render_affine_pie<dtype, rdtype, isbase>(source_x, source_y, dx, dy,
+        cnt, map_size, map_base, tile_base, dst_ptr, bg_comb, px_comb, pal);
+      return;
+    }
+#endif
     // In wrap mode the entire space is covered, since it "wraps" at the edges
     u8 pval = 0;
     u32 mctr = 0;
@@ -765,6 +856,21 @@ static inline void render_affine_background(
         source_x += dx; source_y += dy;
         cnt--;
       }
+
+#if defined(GPSP_AFFINE_PIE)
+      // A line crosses the square map once, so the inside pixels form one
+      // run. The loop below then stops at the first pixel past it.
+      if (!mosaic && cnt) {
+        s32 size = (s32)(width_height << 8);
+        u32 run = affine_steps_inside(source_x, dx, size, cnt);
+        run = affine_steps_inside(source_y, dy, size, run);
+        render_affine_pie<dtype, rdtype, isbase>(source_x, source_y, dx, dy,
+          run, map_size, map_base, tile_base, dst_ptr, bg_comb, px_comb, pal);
+        dst_ptr += run;
+        source_x += (s32)run * dx; source_y += (s32)run * dy;
+        cnt -= run;
+      }
+#endif
 
       // Draw background pixels by looking them up in the map
       u8 pval = 0;
