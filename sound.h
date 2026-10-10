@@ -23,6 +23,11 @@
 #define BUFFER_SIZE        (1 << 16)
 #define BUFFER_SIZE_MASK   (BUFFER_SIZE - 1)
 
+/* Noise channel periods: positions stay below these for 15-bit and 7-bit
+   noise. */
+#define gbc_noise_wrap_full 32767
+#define gbc_noise_wrap_half 126
+
 /* Runtime output rate, restricted to powers of two so that all fixed point
  * frequency steps below remain exact against the 2^24 Hz master clock.
  * sound_frequency == 1u << sound_freq_bits, and is at most
@@ -59,6 +64,7 @@ static INLINE fixed16_16 psg_noise_step(u32 dividing_ratio, u32 freq_shift)
  * gba_memory.c since it needs timer state). Call on an output-rate change
  * and after loading a savestate. */
 void sound_frequency_changed(void);
+void sound_update_tick_step(void);
 
 /* Drop pending ring contents and realign producers/consumer (rate change). */
 void sound_flush_ring(void);

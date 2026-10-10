@@ -236,6 +236,8 @@ bool gba_load_state(const void* src)
   }
 
   video_reload_counters();
+  /* Steps were saved at the rate of the saving build; use the current one. */
+  sound_frequency_changed();
 
   // Reset most of the frame state and dynarec state
 #ifdef HAVE_DYNAREC

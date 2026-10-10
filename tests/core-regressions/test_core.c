@@ -7,6 +7,9 @@
 #include "common.h"
 #include <assert.h>
 
+/* Seed the mix ring without a frontend or an audio device. */
+#include "../../sound.c"
+
 static u8 state[GBA_STATE_MEM_SIZE];
 static u8 damaged[GBA_STATE_MEM_SIZE];
 static u8 before[GBA_STATE_MEM_SIZE];
@@ -146,6 +149,54 @@ static void test_irq(void)
     puts("IRQ: PASS (vector, return address, entry cost, carried stall)");
 }
 
+static void set_rate(u32 bits)
+{
+    sound_freq_bits = bits;
+    sound_frequency = 1u << bits;
+    sound_frequency_changed();
+}
+
+static void test_sound(void)
+{
+    reset_gba();
+    gbc_sound_channel[0].rate = 1024;
+    gbc_sound_channel[2].rate = 1024;
+    write_ioreg(REG_SOUND4CNT_H, 1);
+    set_rate(16);
+    save(state);
+    set_rate(15);
+    assert(retro_unserialize(state, sizeof(state)));
+    assert(sound_frequency == 32768);
+    assert(gbc_sound_channel[0].frequency_step == 2048);
+    assert(gbc_sound_channel[2].frequency_step == 4096);
+    assert(gbc_sound_channel[3].frequency_step == 524288);
+
+    for (u32 bits = 15; bits <= 16; bits++)
+    {
+        reset_sound();
+        set_rate(bits);
+        sound_on = 1;
+        gbc_sound_channel[0].active_flag = 1;
+        gbc_sound_channel[0].status = GBC_SOUND_LEFTRIGHT;
+        gbc_sound_channel[0].length_status = 1;
+        gbc_sound_channel[0].length_ticks = 10;
+        /* 1/256 second advances the length unit once at either rate. */
+        cpu_ticks = gbc_sound_last_cpu_ticks + 65536;
+        render_gbc_sound();
+        assert(gbc_sound_channel[0].length_ticks == 9);
+    }
+
+    gbc_sound_channel[3].sample_index = u32_to_fp16_16(1000) + 123;
+    write_memory16(0x04000000 + REG_SOUND4CNT_H * 2, 8);
+    assert(gbc_sound_channel[3].sample_index == u32_to_fp16_16(118) + 123);
+    save(state);
+    put32(field(field(field(state, "sound"), "gs3"), "sample-idx"), 0xffffffff);
+    assert(retro_unserialize(state, sizeof(state)));
+    assert(gbc_sound_channel[3].sample_index < u32_to_fp16_16(gbc_noise_wrap_half));
+
+    puts("sound: PASS (rate, state, length clock, noise wrap)");
+}
+
 int main(void)
 {
     static const u8 rom[32768] = {0xfe, 0xff, 0xff, 0xea}; /* b . */
@@ -164,6 +215,7 @@ int main(void)
 
     test_state();
     test_irq();
+    test_sound();
     retro_unload_game();
     retro_deinit();
     return 0;

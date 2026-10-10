@@ -355,10 +355,6 @@ u32 gbc_sound_master_volume;
     update_tone_counters(envelope_op, sweep_op);                              \
   }                                                                           \
 
-#define gbc_noise_wrap_full 32767
-
-#define gbc_noise_wrap_half 126
-
 #define get_noise_sample_full()                                               \
   current_sample =                                                            \
    ((s32)(noise_table15[fp16_16_to_u32(sample_index) >> 5] <<                 \
@@ -598,10 +594,16 @@ void reset_sound(void)
   }
 }
 
+/* PSG length, envelope and sweep run at 256 Hz: 256 / sound_frequency in
+ * 16.16, i.e. 256 at 65536 Hz and 512 at 32768 Hz. */
+void sound_update_tick_step(void)
+{
+  gbc_sound_tick_step = (fixed16_16)(1u << (24 - sound_freq_bits));
+}
+
 void init_sound()
 {
-  /* 256 / sound_frequency in 16.16 == 256 (sound_frequency == 2^16). */
-  gbc_sound_tick_step = (fixed16_16)256u;
+  sound_update_tick_step();
 
   init_noise_table(noise_table15, 32767, 14);
   init_noise_table(noise_table7, 127, 6);
@@ -733,7 +735,6 @@ bool sound_read_savestate(const u8 *src)
     bson_read_int32(snddoc, "gbc-ms-vol", &gbc_sound_master_volume) &&
     bson_read_bytes(snddoc, "wav-samples", wave_samples, sizeof(wave_samples))))
     return false;
-
   for (i = 0; i < 2; i++)
   {
     direct_sound_struct *ds = &direct_sound_channel[i];
@@ -785,6 +786,15 @@ bool sound_read_savestate(const u8 *src)
       bson_read_int32(sndchan, "noise-type", &gs->noise_type) &&
       bson_read_int32(sndchan, "sample-tbl", &gs->sample_table_idx)))
       return false;
+    /* The noise position indexes the table of the current width. A
+       stopped channel may keep a 15-bit position after a switch to 7 bits
+       (a retrigger clears it): wrap it instead of failing the load. */
+    if (i == 3)
+    {
+      fixed16_16 wrap = u32_to_fp16_16(gs->noise_type == 1 ?
+            gbc_noise_wrap_half : gbc_noise_wrap_full);
+      gs->sample_index %= wrap;
+    }
   }
 
   return true;

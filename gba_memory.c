@@ -120,6 +120,11 @@ static const u32 gbc_sound_wave_volume[4] = { 0, 16384, 8192, 4096 };
   gbc_sound_channel[3].frequency_step =                                       \
    psg_noise_step(dividing_ratio, frequency_shift);                           \
   gbc_sound_channel[3].noise_type = (value >> 3) & 0x01;                      \
+  /* A switch to 7-bit noise keeps the position; the 7-bit table is far    \
+     shorter, so wrap it into its period. */                                \
+  if(gbc_sound_channel[3].noise_type)                                         \
+    gbc_sound_channel[3].sample_index %=                                      \
+     u32_to_fp16_16(gbc_noise_wrap_half);                                     \
   gbc_sound_channel[3].length_status = (value >> 14) & 0x01;                  \
   if(value & 0x8000)                                                          \
   {                                                                           \
@@ -209,6 +214,7 @@ void sound_frequency_changed(void)
    u32 i;
    u16 snd4 = read_ioreg(REG_SOUND4CNT_H);
 
+   sound_update_tick_step();
    gbc_sound_channel[0].frequency_step = psg_tone_step(gbc_sound_channel[0].rate);
    gbc_sound_channel[1].frequency_step = psg_tone_step(gbc_sound_channel[1].rate);
    gbc_sound_channel[2].frequency_step = psg_wave_step(gbc_sound_channel[2].rate);

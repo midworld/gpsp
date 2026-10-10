@@ -72,6 +72,8 @@ static void gpsp_apply_sound_rate(const char *value, retro_environment_t reinit_
 
    sound_freq_bits = new_bits;
    sound_frequency = 1u << new_bits;
+   /* init_sound() ran at the old rate before the game's options load. */
+   sound_update_tick_step();
    audio_samples_per_frame   = (float)sound_frequency / (float)(GBA_FPS);
    audio_samples_accumulator = 0.0f;
 
