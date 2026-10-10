@@ -454,6 +454,23 @@ void reload_timing_info()
   }
 }
 
+size_t gpsp_backup_size(void)
+{
+  u32 type = backup_type == BACKUP_UNKN ? backup_type_reset : backup_type;
+
+  switch(type)
+  {
+    case BACKUP_SRAM:
+      return 32 * 1024;
+    case BACKUP_FLASH:
+      return flash_bank_cnt == FLASH_SIZE_128KB ? 128 * 1024 : 64 * 1024;
+    case BACKUP_EEPROM:
+      return eeprom_size == EEPROM_8_KBYTE ? 8 * 1024 : 512;
+    default:
+      return 0;
+  }
+}
+
 u8 read_backup(u32 address)
 {
   u8 value = 0;

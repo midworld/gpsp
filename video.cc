@@ -20,9 +20,22 @@
 
 extern "C" {
   #include "common.h"
+  #include "gpsp_screen.h"
 }
 
 u16* gba_screen_pixels = NULL;
+
+static_assert(GPSP_SCREEN_BUFFER_BYTES == GBA_SCREEN_BUFFER_SIZE,
+    "frontend screen buffers must match the core's");
+
+uint16_t *gpsp_screen_set_buffer(uint16_t *pixels)
+{
+  uint16_t *previous = gba_screen_pixels;
+
+  if (pixels)
+    gba_screen_pixels = pixels;
+  return previous;
+}
 
 #define get_screen_pixels()   gba_screen_pixels
 #define get_screen_pitch()    GBA_SCREEN_PITCH

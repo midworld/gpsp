@@ -405,6 +405,8 @@ extern u32 flash_bank_cnt;
 extern u32 eeprom_size;
 
 extern u8 gamepak_backup[1024 * 128];
+/* Raw .sav size of the detected save type (see include/gpsp_backup.h). */
+size_t gpsp_backup_size(void);
 
 // Page sticky bit routines
 extern u32 gamepak_sticky_bit[1024/32];

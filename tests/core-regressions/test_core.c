@@ -5,6 +5,7 @@
  */
 
 #include "common.h"
+#include "gpsp_screen.h"
 #include <assert.h>
 
 /* Seed the mix ring without a frontend or an audio device. */
@@ -14,6 +15,8 @@ static u8 state[GBA_STATE_MEM_SIZE];
 static u8 damaged[GBA_STATE_MEM_SIZE];
 static u8 before[GBA_STATE_MEM_SIZE];
 static u8 after[GBA_STATE_MEM_SIZE];
+static u16 buffers[2][GPSP_SCREEN_BUFFER_BYTES / sizeof(u16)];
+static unsigned buffer_index, frames;
 
 static bool environment(unsigned cmd, void *data)
 {
@@ -32,7 +35,14 @@ static bool environment(unsigned cmd, void *data)
 
 static void video(const void *data, unsigned width, unsigned height, size_t pitch)
 {
-    (void)data; (void)width; (void)height; (void)pitch;
+    assert(data == buffers[buffer_index]);
+    assert(width == 240 && height == 160 && pitch == 480);
+    assert(((const u16 *)data)[0] == convert_palette(0x001f));
+    assert(((const u16 *)data)[1] == convert_palette(0x7c00));
+    unsigned next = buffer_index ^ 1;
+    assert(gpsp_screen_set_buffer(buffers[next]) == buffers[buffer_index]);
+    buffer_index = next;
+    frames++;
 }
 
 static size_t audio(const int16_t *data, size_t count)
@@ -228,10 +238,23 @@ int main(void)
     retro_init();
     assert(retro_load_game(&game));
 
+    u16 *owned = gpsp_screen_set_buffer(NULL);
+    assert(owned && gpsp_screen_set_buffer(buffers[0]) == owned);
+    assert(gpsp_screen_set_buffer(NULL) == buffers[0]);
+    write_memory16(0x06000000, 0x001f);
+    write_memory16(0x06000002, 0x7c00);
+    write_memory16(0x04000000, 0x0403);
+    for (unsigned i = 0; i < 4; i++)
+        retro_run();
+    assert(frames == 4);
+    assert(gpsp_screen_set_buffer(owned) == buffers[buffer_index]);
+    puts("screen: PASS (query, alternating buffers, pixels, restore)");
+
     test_state();
     test_irq();
     test_sound();
     retro_unload_game();
     retro_deinit();
+    assert(!gpsp_screen_set_buffer(NULL));
     return 0;
 }
