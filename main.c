@@ -395,10 +395,10 @@ void print_regs(void)
 bool main_check_savestate(const u8 *src)
 {
   int i;
+  if (!bson_contains_doc(src, "emu") || !bson_contains_doc(src, "timers"))
+    return false;
   const u8 *p1 = bson_find_key(src, "emu");
   const u8 *p2 = bson_find_key(src, "timers");
-  if (!p1 || !p2)
-    return false;
 
   if (!bson_contains_key(p1, "cpu-ticks", BSON_TYPE_INT32) ||
       !bson_contains_key(p1, "exec-cycles", BSON_TYPE_INT32) ||
@@ -412,9 +412,9 @@ bool main_check_savestate(const u8 *src)
   for (i = 0; i < 4; i++)
   {
     char tname[2] = {'0' + i, 0};
-    const u8 *p = bson_find_key(p2, tname);
-    if (!p)
+    if (!bson_contains_doc(p2, tname))
       return false;
+    const u8 *p = bson_find_key(p2, tname);
 
     if (!bson_contains_key(p, "count", BSON_TYPE_INT32) ||
         !bson_contains_key(p, "reload", BSON_TYPE_INT32) ||
@@ -423,6 +423,12 @@ bool main_check_savestate(const u8 *src)
         !bson_contains_key(p, "dsc", BSON_TYPE_INT32) ||
         !bson_contains_key(p, "irq", BSON_TYPE_INT32) ||
         !bson_contains_key(p, "status", BSON_TYPE_INT32))
+      return false;
+
+    /* A shift count: 0, 6, 8 or 10 from prescale_table. */
+    u32 prescale;
+    bson_read_int32(p, "prescale", &prescale);
+    if (prescale > 10)
       return false;
   }
 

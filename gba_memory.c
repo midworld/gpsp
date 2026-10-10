@@ -2663,19 +2663,20 @@ bool memory_check_savestate(const u8 *src)
     "len", "size", "repeat", "start", "dsc", "irq"
   };
   int i;
+  if (!bson_contains_doc(src, "memory") || !bson_contains_doc(src, "backup") ||
+      !bson_contains_doc(src, "dma"))
+    return false;
   const u8 *memdoc = bson_find_key(src, "memory");
   const u8 *bakdoc = bson_find_key(src, "backup");
   const u8 *dmadoc = bson_find_key(src, "dma");
-  if (!memdoc || !bakdoc || !dmadoc)
-    return false;
 
-  // Check memory buffers (TODO: check sizes!)
-  if (!bson_contains_key(memdoc, "iwram", BSON_TYPE_BIN) ||
-      !bson_contains_key(memdoc, "ewram", BSON_TYPE_BIN) ||
-      !bson_contains_key(memdoc, "vram", BSON_TYPE_BIN) ||
-      !bson_contains_key(memdoc, "oamram", BSON_TYPE_BIN) ||
-      !bson_contains_key(memdoc, "palram", BSON_TYPE_BIN) ||
-      !bson_contains_key(memdoc, "ioregs", BSON_TYPE_BIN) ||
+  // Check memory buffers, with the sizes memory_read_savestate expects
+  if (!bson_contains_bytes(memdoc, "iwram", 0x8000) ||
+      !bson_contains_bytes(memdoc, "ewram", 0x40000) ||
+      !bson_contains_bytes(memdoc, "vram", sizeof(vram)) ||
+      !bson_contains_bytes(memdoc, "oamram", sizeof(oam_ram)) ||
+      !bson_contains_bytes(memdoc, "palram", sizeof(palette_ram)) ||
+      !bson_contains_bytes(memdoc, "ioregs", sizeof(io_registers)) ||
       !bson_contains_key(memdoc, "dma-bus", BSON_TYPE_INT32))
      return false;
 
@@ -2684,20 +2685,72 @@ bool memory_check_savestate(const u8 *src)
     if (!bson_contains_key(bakdoc, vars32[i], BSON_TYPE_INT32))
       return false;
 
-  if (!bson_contains_key(bakdoc, "gpio-regs", BSON_TYPE_BIN) ||
-      !bson_contains_key(bakdoc, "rtc-data-words", BSON_TYPE_ARR))
+  if (!bson_contains_bytes(bakdoc, "gpio-regs", sizeof(gpio_regs)) ||
+      !bson_contains_int32_array(bakdoc, "rtc-data-words", 2))
       return false;
+  /* Optional, but read as an array when present. */
+  if (bson_find_key(bakdoc, "rtc-base-time") &&
+      !bson_contains_int32_array(bakdoc, "rtc-base-time", 2))
+    return false;
+
+  /* Values that index gamepak_backup (128 KiB), checked before any state
+     is replaced. EEPROM reads and writes 8 bytes at a block address. While
+     the address bits arrive it holds up to 16 raw bits, which later shift
+     to a block address below 128 KiB. Every later step keeps the block
+     address: the read footer and header pass it on to the read. */
+  {
+    u32 bank, mode, addr, count;
+    bson_read_int32(bakdoc, "flash-bank-num", &bank);
+    bson_read_int32(bakdoc, "eeprom-mode", &mode);
+    bson_read_int32(bakdoc, "eeprom-addr", &addr);
+    bson_read_int32(bakdoc, "eeprom-counter", &count);
+    if (bank > 1)
+      return false;
+    switch (mode)
+    {
+      case EEPROM_BASE_MODE:
+        /* The address still holds the last block (or command bits); it is
+           cleared after two bits and not used as an index here. */
+        if (count >= 2)
+          return false;
+        break;
+      case EEPROM_ADDRESS_MODE:
+      case EEPROM_WRITE_ADDRESS_MODE:
+        if (addr > 0xFFFF || count >= 16)
+          return false;
+        break;
+      case EEPROM_ADDRESS_FOOTER_MODE:
+      case EEPROM_READ_HEADER_MODE:
+      case EEPROM_READ_MODE:
+      case EEPROM_WRITE_MODE:
+      case EEPROM_WRITE_FOOTER_MODE:
+        if (addr > sizeof(gamepak_backup) - 8 ||
+            count >= (mode == EEPROM_READ_HEADER_MODE ? 4 : 64))
+          return false;
+        break;
+      default:
+        return false;
+    }
+  }
 
   for (i = 0; i < DMA_CHAN_CNT; i++)
   {
     char tname[2] = {'0' + i, 0};
-    const u8 *dmastr = bson_find_key(dmadoc, tname);
-    if (!dmastr)
+    if (!bson_contains_doc(dmadoc, tname))
       return false;
+    const u8 *dmastr = bson_find_key(dmadoc, tname);
 
-    for (i = 0; i < sizeof(dmavars32)/sizeof(dmavars32[0]); i++)
-      if (!bson_contains_key(dmastr, dmavars32[i], BSON_TYPE_INT32))
+    /* Own index: reusing i ended the channel loop after DMA 0. */
+    for (int j = 0; j < sizeof(dmavars32)/sizeof(dmavars32[0]); j++)
+      if (!bson_contains_key(dmastr, dmavars32[j], BSON_TYPE_INT32))
         return false;
+
+    /* The directions index dma_stride. */
+    u32 src_dir, dst_dir;
+    bson_read_int32(dmastr, "src-dir", &src_dir);
+    bson_read_int32(dmastr, "dst-dir", &dst_dir);
+    if (src_dir >= 4 || dst_dir >= 4)
+      return false;
   }
   return true;
 }

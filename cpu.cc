@@ -3670,14 +3670,20 @@ void init_cpu(void)
 
 bool cpu_check_savestate(const u8 *src)
 {
-  const u8 *cpudoc = bson_find_key(src, "cpu");
-  if (!cpudoc)
+  if (!bson_contains_doc(src, "cpu"))
     return false;
+  const u8 *cpudoc = bson_find_key(src, "cpu");
 
-  return bson_contains_key(cpudoc, "bus-value", BSON_TYPE_INT32) &&
-         bson_contains_key(cpudoc, "regs", BSON_TYPE_ARR) &&
-         bson_contains_key(cpudoc, "spsr", BSON_TYPE_ARR) &&
-         bson_contains_key(cpudoc, "regmod", BSON_TYPE_ARR);
+  u32 regs[REG_ARCH_COUNT];
+  if (!(bson_contains_key(cpudoc, "bus-value", BSON_TYPE_INT32) &&
+        bson_contains_int32_array(cpudoc, "regs", REG_ARCH_COUNT) &&
+        bson_contains_int32_array(cpudoc, "spsr", 6) &&
+        bson_contains_int32_array(cpudoc, "regmod", 7*7) &&
+        bson_read_int32_array(cpudoc, "regs", regs, REG_ARCH_COUNT)))
+    return false;
+  /* The mode indexes reg_mode and spsr: user, or system to undefined. */
+  return regs[CPU_MODE] == MODE_USER ||
+         (regs[CPU_MODE] >= MODE_SYSTEM && regs[CPU_MODE] <= MODE_UNDEFINED);
 }
 
 

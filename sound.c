@@ -628,42 +628,78 @@ bool sound_check_savestate(const u8 *src)
   };
 
   int i;
-  const u8 *snddoc = bson_find_key(src, "sound");
-  if (!snddoc)
+  if (!bson_contains_doc(src, "sound"))
     return false;
+  const u8 *snddoc = bson_find_key(src, "sound");
 
   for (i = 0; i < sizeof(gvars)/sizeof(gvars[0]); i++)
     if (!bson_contains_key(snddoc, gvars[i], BSON_TYPE_INT32))
       return false;
-  if (!bson_contains_key(snddoc, "wav-samples", BSON_TYPE_BIN))
+  if (!bson_contains_bytes(snddoc, "wav-samples", sizeof(wave_samples)))
     return false;
+
+  /* Values used as indexes or shift counts are checked here, before any
+     state is replaced: the mix ring (stereo pairs) and volume tables. */
+  {
+    u32 base, idx, left, right, master;
+    bson_read_int32(snddoc, "buf-base", &base);
+    bson_read_int32(snddoc, "gbc-buf-idx", &idx);
+    bson_read_int32(snddoc, "gbc-ms-vol-left", &left);
+    bson_read_int32(snddoc, "gbc-ms-vol-right", &right);
+    bson_read_int32(snddoc, "gbc-ms-vol", &master);
+    if (base >= BUFFER_SIZE || idx >= BUFFER_SIZE || (idx & 1) ||
+        left >= 8 || right >= 8 || master >= 4)
+      return false;
+  }
 
 
   for (i = 0; i < 2; i++)
   {
     char tn[4] = {'d', 's', '0' + i, 0};
-    const u8 *sndchan = bson_find_key(snddoc, tn);
-    if (!sndchan)
+    if (!bson_contains_doc(snddoc, tn))
       return false;
+    const u8 *sndchan = bson_find_key(snddoc, tn);
 
-    for (i = 0; i < sizeof(dsvars)/sizeof(dsvars[0]); i++)
-      if (!bson_contains_key(sndchan, dsvars[i], BSON_TYPE_INT32))
+    /* Own index: reusing i ended the channel loop after the first. */
+    for (int j = 0; j < sizeof(dsvars)/sizeof(dsvars[0]); j++)
+      if (!bson_contains_key(sndchan, dsvars[j], BSON_TYPE_INT32))
         return false;
 
-    if (!bson_contains_key(sndchan, "fifo-bytes", BSON_TYPE_BIN))
+    if (!bson_contains_bytes(sndchan, "fifo-bytes",
+          sizeof(direct_sound_channel[0].fifo)))
+      return false;
+
+    /* FIFO positions, the volume shift and the mix ring index. */
+    u32 fbase, ftop, vol, idx;
+    bson_read_int32(sndchan, "fifo-base", &fbase);
+    bson_read_int32(sndchan, "fifo-top", &ftop);
+    bson_read_int32(sndchan, "volume", &vol);
+    bson_read_int32(sndchan, "buf-idx", &idx);
+    if (fbase >= 32 || ftop >= 32 || vol > 1 || idx >= BUFFER_SIZE ||
+        (idx & 1))
       return false;
   }
 
   for (i = 0; i < 4; i++)
   {
     char tn[4] = {'g', 's', '0' + i, 0};
-    const u8 *sndchan = bson_find_key(snddoc, tn);
-    if (!sndchan)
+    if (!bson_contains_doc(snddoc, tn))
       return false;
+    const u8 *sndchan = bson_find_key(snddoc, tn);
 
-    for (i = 0; i < sizeof(gsvars)/sizeof(gsvars[0]); i++)
-      if (!bson_contains_key(sndchan, gsvars[i], BSON_TYPE_INT32))
+    for (int j = 0; j < sizeof(gsvars)/sizeof(gsvars[0]); j++)
+      if (!bson_contains_key(sndchan, gsvars[j], BSON_TYPE_INT32))
         return false;
+
+    /* Duty and envelope tables, the sweep shift (3 bits) and the rate
+       (11 bits; steps divide by 2048 - rate). */
+    u32 table, env, shift, rate;
+    bson_read_int32(sndchan, "sample-tbl", &table);
+    bson_read_int32(sndchan, "env-vol", &env);
+    bson_read_int32(sndchan, "sweep-shift", &shift);
+    bson_read_int32(sndchan, "rate", &rate);
+    if (table >= 4 || env >= 16 || shift > 7 || rate >= 2048)
+      return false;
   }
 
   return true;

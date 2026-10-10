@@ -64,6 +64,44 @@ const u8* bson_find_key(const u8 *srcp, const char *key)
   return NULL;
 }
 
+/* A byte array of exactly cnt bytes: what bson_read_bytes will accept. */
+bool bson_contains_bytes(const u8 *srcp, const char *key, unsigned cnt)
+{
+  const u8* p;
+
+  if (!bson_contains_key(srcp, key, BSON_TYPE_BIN))
+    return false;
+  p = bson_find_key(srcp, key);
+  return p && bson_read_u32(p) == cnt;
+}
+
+/* A nested document. gba_load_state checked every document and array for
+   bounds, but not the inside of byte arrays: readers must only descend
+   into keys of this type. */
+bool bson_contains_doc(const u8 *srcp, const char *key)
+{
+  return srcp && bson_contains_key(srcp, key, BSON_TYPE_DOC);
+}
+
+/* An array of cnt int32 values laid out as bson_read_int32_array reads it:
+   two-character keys and nothing else. */
+bool bson_contains_int32_array(const u8 *srcp, const char *key, unsigned cnt)
+{
+  const u8* p;
+
+  if (!srcp || !bson_contains_key(srcp, key, BSON_TYPE_ARR))
+    return false;
+  p = bson_find_key(srcp, key);
+  if (!p || bson_read_u32(p) != 5 + cnt * 8)
+    return false;
+  for (unsigned i = 0; i < cnt; i++) {
+    const u8 *e = p + 4 + i * 8;
+    if (e[0] != BSON_TYPE_INT32 || !e[1] || !e[2] || e[3])
+      return false;
+  }
+  return p[4 + cnt * 8] == 0;
+}
+
 bool bson_read_int32(const u8 *srcp, const char *key, u32* value)
 {
   const u8* p = srcp ? bson_find_key(srcp, key) : NULL;
@@ -112,12 +150,60 @@ bool bson_read_bytes(const u8 *srcp, const char *key, void* buffer, unsigned cnt
   return false;
 }
 
+/* Checks that a document and everything nested in it stays inside its
+   length, with terminated keys and only the types the readers above can
+   skip. They trust these lengths, so a damaged state must fail here. */
+static bool bson_valid_document(const u8 *doc, u32 avail, unsigned depth)
+{
+  u32 doclen, pos = 4;
+
+  if (avail < 5 || depth > 8)
+    return false;
+  doclen = bson_read_u32(doc);
+  if (doclen < 5 || doclen > avail || doc[doclen - 1] != 0)
+    return false;
+
+  while (doc[pos] != 0) {
+    u8 tp = doc[pos];
+    const u8 *key = &doc[pos + 1];
+    const u8 *end = memchr(key, 0, doclen - 1 - (pos + 1));
+    u32 left, len;
+    if (!end)
+      return false;
+    pos = (u32)(end - doc) + 1;
+    left = doclen - 1 - pos;
+
+    if (tp == BSON_TYPE_INT32) {
+      len = 4;
+    } else if (tp == BSON_TYPE_DOC || tp == BSON_TYPE_ARR) {
+      if (left < 5 || !bson_valid_document(&doc[pos], left, depth + 1))
+        return false;
+      len = bson_read_u32(&doc[pos]);
+    } else if (tp == BSON_TYPE_BIN) {
+      if (left < 5)
+        return false;
+      len = bson_read_u32(&doc[pos]);
+      if (len > left - 5)
+        return false;
+      len += 5;
+    } else
+      return false;
+
+    if (len > left)
+      return false;
+    pos += len;
+  }
+  return pos == doclen - 1;
+}
+
 bool gba_load_state(const void* src)
 {
   u32 i, tmp;
   u8* srcptr = (u8*)src;
   u32 docsize = bson_read_u32(srcptr);
   if (docsize != GBA_STATE_MEM_SIZE)
+    return false;
+  if (!bson_valid_document(srcptr, GBA_STATE_MEM_SIZE, 0))
     return false;
 
   if (!bson_read_int32(srcptr, "info-magic", &tmp) || tmp != GBA_STATE_MAGIC)
@@ -197,5 +283,3 @@ void gba_save_state(void* dst)
   // Update the doc size  
   bson_write_u32(stptr, wrptr - stptr);
 }
-
-

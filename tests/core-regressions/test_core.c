@@ -7,6 +7,10 @@
 #include "common.h"
 #include <assert.h>
 
+static u8 state[GBA_STATE_MEM_SIZE];
+static u8 damaged[GBA_STATE_MEM_SIZE];
+static u8 before[GBA_STATE_MEM_SIZE];
+static u8 after[GBA_STATE_MEM_SIZE];
 
 static bool environment(unsigned cmd, void *data)
 {
@@ -39,6 +43,73 @@ static int16_t input(unsigned port, unsigned device, unsigned index, unsigned id
 {
     (void)port; (void)device; (void)index; (void)id;
     return 0;
+}
+
+static void save(u8 *dst)
+{
+    memset(dst, 0, GBA_STATE_MEM_SIZE);
+    assert(retro_serialize(dst, GBA_STATE_MEM_SIZE));
+}
+
+static u8 *field(u8 *doc, const char *key)
+{
+    u8 *p = (u8 *)bson_find_key(doc, key);
+    assert(p);
+    return p;
+}
+
+static void put32(u8 *p, u32 value)
+{
+    bson_write_u32(p, value);
+}
+
+static void rejected(void)
+{
+    save(before);
+    assert(!retro_unserialize(damaged, sizeof(damaged)));
+    save(after);
+    assert(!memcmp(before, after, sizeof(before)));
+}
+
+static void test_state(void)
+{
+    save(state);
+    reg[0] = 0x12345678;
+    assert(retro_unserialize(state, sizeof(state)));
+    assert(reg[0] != 0x12345678);
+    assert(!retro_unserialize(state, sizeof(state) - 1));
+
+    memcpy(damaged, state, sizeof(state));
+    put32(damaged, 4);
+    rejected();
+    memcpy(damaged, state, sizeof(state));
+    put32(field(damaged, "cpu"), sizeof(state));
+    rejected();
+    memcpy(damaged, state, sizeof(state));
+    damaged[4] = 0x7f;
+    rejected();
+    memcpy(damaged, state, sizeof(state));
+    u8 *regs = field(field(damaged, "cpu"), "regs");
+    regs[4] = BSON_TYPE_DOC;
+    rejected();
+    memcpy(damaged, state, sizeof(state));
+    regs = field(field(damaged, "cpu"), "regs");
+    put32(regs + 8 + CPU_MODE * 8, 0xffffffff);
+    rejected();
+    memcpy(damaged, state, sizeof(state));
+    put32(field(field(field(damaged, "sound"), "ds1"), "fifo-base"), 32);
+    rejected();
+    memcpy(damaged, state, sizeof(state));
+    put32(field(field(field(damaged, "sound"), "gs3"), "rate"), 2048);
+    rejected();
+    memcpy(damaged, state, sizeof(state));
+    put32(field(field(damaged, "sound"), "wav-samples"), 1);
+    rejected();
+    memcpy(damaged, state, sizeof(state));
+    u8 *snd = field(damaged, "sound");
+    snd[-(int)sizeof("sound") - 1] = BSON_TYPE_BIN;
+    rejected();
+    puts("state: PASS (round trip, malformed documents, no partial mutation)");
 }
 
 static void test_irq(void)
@@ -91,6 +162,7 @@ int main(void)
     retro_init();
     assert(retro_load_game(&game));
 
+    test_state();
     test_irq();
     retro_unload_game();
     retro_deinit();
