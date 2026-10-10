@@ -372,9 +372,16 @@ u32 frame_start_cycles(void)
 void reset_gba(void)
 {
   gbp_reset();
+  // Drop a transfer the previous game or boot left pending
+  serial_set_irq_cycles(0);
+  serialproto_reset();
   init_memory();
   init_main();
   init_cpu();
+  // The renderer keeps the previous game's sprite list and BG2/BG3
+  // reference points; rebuild them from the cleared registers.
+  reg[OAM_UPDATED] = 1;
+  video_reload_counters();
   reset_sound();
 }
 

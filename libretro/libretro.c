@@ -930,7 +930,7 @@ static void extract_directory(char* buf, const char* path, size_t size)
 static void check_variables(bool started_from_load)
 {
    struct retro_variable var;
-   bool frameskip_type_prev;
+   frameskip_type frameskip_type_prev;
    bool post_process_cc_prev;
    bool post_process_mix_prev;
 

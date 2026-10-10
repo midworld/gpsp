@@ -2604,6 +2604,11 @@ void init_memory(void)
   memset(io_registers, 0, sizeof(io_registers));
   memset(oam_ram, 0, sizeof(oam_ram));
   memset(palette_ram, 0, sizeof(palette_ram));
+  // The renderer reads the converted colors: clear them with the palette
+  for (i = 0; i < 512; i++)
+  {
+    palette_ram_converted[i] = convert_palette(0);
+  }
   memset(iwram, 0, sizeof(iwram));
   memset(ewram, 0, sizeof(ewram));
   memset(vram, 0, sizeof(vram));
@@ -3201,6 +3206,12 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name,
                  int force_rtc, int force_rumble, int force_serial)
 {
    char game_code[5] = {0,0,0,0,0};
+
+   /* Loading a 1MB ROM writes the GPIO registers into its image: drop the
+    * previous cartridge's ones first. */
+   rtc_enabled = false;
+   rumble_enabled = false;
+   memset(gpio_regs, 0, sizeof(gpio_regs));
 
    if (load_gamepak_raw(name))
       return -1;
