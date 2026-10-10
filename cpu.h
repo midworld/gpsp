@@ -114,6 +114,14 @@ void execute_arm(u32 cycles);
  * Returns the same cycle-count/frame-complete encoding as update_gba(). */
 u32 function_cc execute_arm_vram(u32 cycles);
 u32 check_and_raise_interrupts(void);
+/* Cycles of taken IRQ entries not yet charged to a CPU budget. */
+extern u32 irq_entry_cycles;
+static inline u32 take_irq_entry_cycles(void)
+{
+  u32 cycles = irq_entry_cycles;
+  irq_entry_cycles = 0;
+  return cycles;
+}
 cpu_alert_type check_interrupt(void);
 cpu_alert_type flag_interrupt(irq_type irq_raised);
 void set_cpu_mode(cpu_mode_type new_mode);

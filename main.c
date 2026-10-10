@@ -27,6 +27,21 @@ u32 cpu_ticks = 0;
 u32 execute_cycles = 0;
 s32 video_count = 0;
 
+/* Each line takes 1232 cycles. The HBlank flag, HBlank DMA and line render
+ * start after 1006 (GBATEK). The HBlank IRQ reaches the CPU 3 cycles later;
+ * some handlers read VCOUNT late in the line and rely on it. */
+#define LINE_CYCLES 1232
+#define HBLANK_FLAG_CYCLES 1006
+#define HBLANK_IRQ_CYCLES 1009
+/* video_count during HBlank counts down to the line end. */
+#define HBLANK_IRQ_LEFT (LINE_CYCLES - HBLANK_IRQ_CYCLES)
+
+/* Set at HBlank start when the HBlank IRQ is enabled; the IRQ is raised at
+ * HBLANK_IRQ_CYCLES. Enabling it later in HBlank does not raise it. */
+static u32 hblank_irq_pending = 0;
+/* DMA and IRQ entry cycles not yet charged to a CPU budget. */
+static u32 cpu_stall_cycles = 0;
+
 u32 last_frame = 0;
 u32 flush_ram_count = 0;
 u32 gbc_update_count = 0;
@@ -108,8 +123,11 @@ void init_main(void)
 
   frame_counter = 0;
   cpu_ticks = 0;
-  execute_cycles = 960;
-  video_count = 960;
+  execute_cycles = HBLANK_FLAG_CYCLES;
+  video_count = HBLANK_FLAG_CYCLES;
+  irq_entry_cycles = 0;
+  hblank_irq_pending = 0;
+  cpu_stall_cycles = 0;
 
 #ifdef HAVE_DYNAREC
 #if defined(MMAP_JIT_CACHE)
@@ -130,6 +148,8 @@ u32 function_cc update_gba(int remaining_cycles)
   u32 frame_complete = 0;
   irq_type irq_raised = IRQ_NONE;
   int dma_cycles;
+  // Later iterations only run while the CPU is halted
+  u32 halted_pass = 0;
   trace_update_gba(remaining_cycles);
 
   remaining_cycles = MAX(remaining_cycles, -64);
@@ -144,6 +164,10 @@ u32 function_cc update_gba(int remaining_cycles)
 
     remaining_cycles = 0;
 
+    // Time spent halted already covers owed stall cycles
+    if (halted_pass)
+      cpu_stall_cycles -= MIN(cpu_stall_cycles, completed_cycles);
+
     // Timers can trigger DMA (usually sound) and consume cycles
     dma_cycles = update_timers(&irq_raised, completed_cycles);
     // Check for serial port IRQs as well.
@@ -151,7 +175,16 @@ u32 function_cc update_gba(int remaining_cycles)
       irq_raised |= IRQ_SERIAL;
 
     // Video count tracks the video cycles remaining until the next event
+    s32 previous_video_count = video_count;
     video_count -= completed_cycles;
+
+    // HBlank IRQ point passed during HBlank
+    if (hblank_irq_pending && previous_video_count > HBLANK_IRQ_LEFT &&
+        video_count <= HBLANK_IRQ_LEFT)
+    {
+      hblank_irq_pending = 0;
+      irq_raised |= IRQ_HBLANK;
+    }
 
     // Ran out of cycles, move to the next video area
     if(video_count <= 0)
@@ -164,7 +197,7 @@ u32 function_cc update_gba(int remaining_cycles)
       {
         // Transition from hrefresh to hblank
         dispstat |= 0x02;
-        video_count += (272);    // hblank duration, 272 cycles
+        video_count += LINE_CYCLES - HBLANK_FLAG_CYCLES;
 
         // Check if we are drawing (0) or we are in vblank (1)
         if ((dispstat & 0x01) == 0)
@@ -185,14 +218,20 @@ u32 function_cc update_gba(int remaining_cycles)
           }
         }
 
-        // Trigger the hblank interrupt, if enabled in DISPSTAT
         if (dispstat & 0x10)
-          irq_raised |= IRQ_HBLANK;
+        {
+          // Raise now if the HBlank IRQ point was already overshot
+          if (video_count <= HBLANK_IRQ_LEFT)
+            irq_raised |= IRQ_HBLANK;
+          else
+            hblank_irq_pending = 1;
+        }
       }
       else
       {
         // Transition from hblank to the next scan line (vdraw or vblank)
-        video_count += 960;
+        video_count += HBLANK_FLAG_CYCLES;
+        hblank_irq_pending = 0;
         dispstat &= ~0x02;
         vcount++;
 
@@ -270,6 +309,9 @@ u32 function_cc update_gba(int remaining_cycles)
     // Figure out when we need to stop CPU execution. The next event is
     // a video event or a timer event, whatever happens first.
     execute_cycles = MAX(video_count, 0);
+    if (hblank_irq_pending)
+      execute_cycles = MIN(execute_cycles,
+                           (u32)(video_count - HBLANK_IRQ_LEFT));
     {
       u32 cc = serial_next_event();
       execute_cycles = MIN(execute_cycles, cc);
@@ -297,13 +339,34 @@ u32 function_cc update_gba(int remaining_cycles)
            timer[i].count < execute_cycles)
           execute_cycles = timer[i].count;
     }
+
+    // We voluntarily limit this. It is not accurate but it would be much
+    // harder.
+    cpu_stall_cycles += MIN(64, dma_cycles);
+    halted_pass = 1;
   } while(reg[CPU_HALT_STATE] != CPU_ACTIVE && !frame_complete);
 
-  // We voluntarily limit this. It is not accurate but it would be much harder.
-  dma_cycles = MIN(64, dma_cycles);
-  dma_cycles = MIN(execute_cycles, dma_cycles);
+  // Cycles past the next event carry over. At a frame end the next
+  // frame's first budget pays them.
+  cpu_stall_cycles += take_irq_entry_cycles();
+  dma_cycles = 0;
+  if (!frame_complete)
+  {
+    dma_cycles = MIN(execute_cycles, cpu_stall_cycles);
+    cpu_stall_cycles -= dma_cycles;
+  }
 
   return (execute_cycles - dma_cycles) | changed_pc | frame_complete;
+}
+
+u32 frame_start_cycles(void)
+{
+  u32 stall;
+
+  cpu_stall_cycles += take_irq_entry_cycles();
+  stall = MIN(execute_cycles, cpu_stall_cycles);
+  cpu_stall_cycles -= stall;
+  return execute_cycles - stall;
 }
 
 void reset_gba(void)
@@ -380,6 +443,13 @@ bool main_read_savestate(const u8 *src)
          bson_read_int32(p1, "sleep-cycles", &reg[REG_SLEEP_CYCLES])))
     return false;
 
+  irq_entry_cycles = 0;
+  /* Optional: older states lack these and resume without a pending cost. */
+  cpu_stall_cycles = 0;
+  bson_read_int32(p1, "stall-cycles", &cpu_stall_cycles);
+  hblank_irq_pending = 0;
+  bson_read_int32(p1, "hblank-irq", &hblank_irq_pending);
+
   if (!bson_read_int32(p1, "frame-count", &frame_counter))
     frame_counter = 60 * 10;  // Use "fake" 10 seconds.
 
@@ -435,6 +505,8 @@ unsigned main_write_savestate(u8* dst)
   bson_write_int32(dst, "cpu-ticks", cpu_ticks);
   bson_write_int32(dst, "exec-cycles", execute_cycles);
   bson_write_int32(dst, "video-count", video_count);
+  bson_write_int32(dst, "stall-cycles", cpu_stall_cycles + irq_entry_cycles);
+  bson_write_int32(dst, "hblank-irq", hblank_irq_pending);
   bson_write_int32(dst, "sleep-cycles", reg[REG_SLEEP_CYCLES]);
   bson_write_int32(dst, "serial-irq-cycles", serial_get_irq_cycles());
   bson_write_int32(dst, "rand-state", random_state);
@@ -459,4 +531,3 @@ unsigned main_write_savestate(u8* dst)
 
   return (unsigned int)(dst - startp);
 }
-

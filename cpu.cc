@@ -606,14 +606,11 @@ static const u8 gba_header_logo[156] = {
 // probably not worth optimizing for.
 
 #define check_for_interrupts()                                                \
-  if((read_ioreg(REG_IE) & read_ioreg(REG_IF)) &&                             \
-   read_ioreg(REG_IME) && ((reg[REG_CPSR] & 0x80) == 0))                      \
+  if(check_and_raise_interrupts())                                            \
   {                                                                           \
-    REG_MODE(MODE_IRQ)[6] = reg[REG_PC] + 4;                                  \
-    REG_SPSR(MODE_IRQ) = reg[REG_CPSR];                                       \
-    reg[REG_CPSR] = 0xD2;                                                     \
-    reg[REG_PC] = 0x00000018;                                                 \
-    set_cpu_mode(MODE_IRQ);                                                   \
+    cycles_remaining -= take_irq_entry_cycles();                              \
+    if(cycles_remaining <= 0)                                                 \
+      goto alert;                                                             \
     goto arm_loop;                                                            \
   }                                                                           \
 
@@ -1455,6 +1452,10 @@ cpu_alert_type check_interrupt() {
   return (cpu_has_interrupt()) ? CPU_ALERT_IRQ : CPU_ALERT_NONE;
 }
 
+/* IRQ entry refills the pipeline at the BIOS vector (2S + 1N). */
+#define IRQ_ENTRY_CYCLES 3
+u32 irq_entry_cycles = 0;
+
 // Checks for pending IRQs and raises them. This changes the CPU mode
 // which means that it must be called with a valid CPU state.
 u32 check_and_raise_interrupts()
@@ -1472,6 +1473,7 @@ u32 check_and_raise_interrupts()
     reg[REG_PC] = 0x00000018;
 
     set_cpu_mode(MODE_IRQ);
+    irq_entry_cycles += IRQ_ENTRY_CYCLES;
 
     // Wake up CPU if it is stopped/sleeping.
     if (reg[CPU_HALT_STATE] == CPU_STOP ||
@@ -1532,8 +1534,8 @@ static u32 execute_arm_internal(u32 cycles, bool vram_only)
   cycles_remaining = cycles;
   while(1)
   {
-    /* Do not execute until CPU is active */
-    if (reg[CPU_HALT_STATE] != CPU_ACTIVE) {
+    /* Do not execute until CPU is active and has budget left */
+    while (reg[CPU_HALT_STATE] != CPU_ACTIVE || cycles_remaining <= 0) {
        u32 ret = update_gba(cycles_remaining);
        if (completed_frame(ret))
           return ret;

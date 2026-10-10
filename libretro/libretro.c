@@ -1447,13 +1447,13 @@ void retro_run(void)
    /* This runs just a frame */
    #ifdef HAVE_DYNAREC
    if (dynarec_enable)
-      execute_arm_translate(execute_cycles);
+      execute_arm_translate(frame_start_cycles());
    else
    #endif
    {
       /* Sticky bits only used in interpreter */
       clear_gamepak_stickybits();
-      execute_arm(execute_cycles);
+      execute_arm(frame_start_cycles());
    }
 
    if (rumble_cb) {

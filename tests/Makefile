@@ -30,7 +30,7 @@ DEAD_STRIP := -Wl,--gc-sections
 endif
 CPU_TESTS := arm_alu_interpreter arm_block_transfer shift_interpreter
 CPU_BINS := $(addprefix $(BUILD)/,$(CPU_TESTS))
-HOST_SUITES :=
+HOST_SUITES := core-regressions
 
 .PHONY: check check-cpu check-sanitize
 check: check-cpu
