@@ -244,6 +244,9 @@ bool gba_load_state(const void* src)
 #ifdef HAVE_DYNAREC
   if (dynarec_enable)
     flush_dynarec_caches();
+#elif defined(GPSP_RV32_JIT)
+  if (gpsp_rv32_rom_arena.count)
+    flush_dynarec_caches();
 #endif
 
   instruction_count = 0;

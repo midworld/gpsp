@@ -81,7 +81,7 @@ static void reset_cpu(u32 opcode, u32 initial_flags)
 
 static void run_one()
 {
-  u32 result = execute_arm_internal(1, true);
+  u32 result = execute_arm_internal<false>(1, true);
   assert(result == 0x80000000);
   assert(update_count == 1);
 }

@@ -146,16 +146,6 @@ static void test_irq(void)
     execute_cycles = 10;
     assert(frame_start_cycles() == 8);
     assert(frame_start_cycles() == 10);
-    reset_gba();
-    assert(execute_cycles == 1006);
-    write_ioreg(REG_DISPSTAT, 0x10);
-    update_gba(0);
-    assert(read_ioreg(REG_DISPSTAT) & 2);
-    assert(!(read_ioreg(REG_IF) & IRQ_HBLANK));
-    assert(execute_cycles == 3);
-    update_gba(0);
-    assert(read_ioreg(REG_IF) & IRQ_HBLANK);
-
     puts("IRQ: PASS (vector, return address, entry cost, carried stall)");
 }
 

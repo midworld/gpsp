@@ -21,6 +21,36 @@
 #include "gpsp_memory.h"
 #include "streams/file_stream.h"
 #include "gba_rom_scan.h"
+#if defined(GPSP_RV32_JIT)
+#include "riscv/rv32_ram_units.h"
+#include "riscv/rv32_thumb_memory.h"
+/* Queue code changes and raise SMC unless all live units absorb them. */
+#define write_ram(type, base, offset) {                                       \
+  u##type *dst = &address##type(base, offset);                                \
+  if (gpsp_rv32_store_hits_code(address, (type) / 8))                         \
+  {                                                                           \
+    u##type old = *dst;                                                       \
+    *dst = eswap##type(value);                                                \
+    u32 at = address & ~((type) / 8 - 1);                                     \
+    if (*dst != old && !code_write_absorbed(at, (type) / 8, old, *dst))       \
+    {                                                                         \
+      gpsp_rv32_ram_dirty_add(at, (type) / 8);                                \
+      gpsp_rv32_add_memory_alert(CPU_ALERT_SMC);                              \
+      return CPU_ALERT_SMC;                                                    \
+    }                                                                         \
+  }                                                                           \
+  else                                                                        \
+    *dst = eswap##type(value);                                                \
+}
+#define dma_code_changed(address, bytes)                                      \
+  gpsp_rv32_ram_dirty_add(address, bytes)
+#define code_write_absorbed gpsp_rv32_code_write_absorbed
+#else
+#define write_ram(type, base, offset)                                         \
+  address##type(base, offset) = eswap##type(value)
+#define dma_code_changed(address, bytes) ((void)0)
+#define code_write_absorbed(address, bytes, before, after) false
+#endif
 
 /* Sound */
 #define gbc_sound_tone_control_low(channel, regn)                             \
@@ -824,6 +854,34 @@ u32 function_cc read_io_register16(u32 address)
   }
 }
 
+#if defined(GPSP_RV32_JIT)
+/* Read masks for RV32 native I/O loads, per halfword and per word. Zero
+   keeps open-bus and always-zero registers on the C path. */
+u32 gpsp_rv32_io_read_mask16[512];
+u32 gpsp_rv32_io_read_mask32[256];
+
+static void rv32_io_read_mask_init(void)
+{
+  for (u32 index = 0; index < 512; index++)
+  {
+    u32 saved = read_ioreg(index);
+    gpsp_rv32_io_read_mask16[index] = 0;
+    if (io_read_open_bus16(index * 2))
+      continue;
+    write_ioreg(index, 0xFFFF);
+    gpsp_rv32_io_read_mask16[index] =
+        read_io_register16(0x04000000 | (index * 2));
+    write_ioreg(index, saved);
+  }
+  for (u32 index = 0; index < 256; index++)
+  {
+    u32 low = gpsp_rv32_io_read_mask16[index * 2];
+    u32 high = gpsp_rv32_io_read_mask16[index * 2 + 1];
+    gpsp_rv32_io_read_mask32[index] = low && high ? low | (high << 16) : 0;
+  }
+}
+#endif
+
 u32 function_cc read_io_register8(u32 address)
 {
   u32 offset = address & 0x00ffffff;
@@ -1239,9 +1297,24 @@ cpu_alert_type function_cc write_io_register16(u32 address, u32 value)
       break;
 
     case REG_WAITCNT:
+    {
+#if defined(GPSP_RV32_JIT)
+      /* reload_timing_info() reads only the ROM wait fields. */
+      bool changed = (value ^ read_ioreg(REG_WAITCNT)) & 0x07FC;
+#endif
       write_ioreg(REG_WAITCNT, value);
       reload_timing_info();
+#if defined(GPSP_RV32_JIT)
+      /* Retranslate code that holds the old waits: the SMC alert exits the
+         block and the dispatcher flushes both code caches. */
+      if (changed)
+      {
+        gpsp_rv32_request_wait_flush();
+        return CPU_ALERT_SMC;
+      }
+#endif
       break;
+    }
 
     // Registers without side effects
     default:
@@ -1252,6 +1325,74 @@ cpu_alert_type function_cc write_io_register16(u32 address, u32 value)
 
   return CPU_ALERT_NONE;
 }
+
+#if defined(GPSP_RV32_JIT)
+/* Store masks for RV32 native I/O stores: registers whose case above only
+   stores masked data. Zero keeps side effects on the C path. Keep this in
+   sync with write_io_register16. */
+u32 gpsp_rv32_io_write_mask16[512];
+u32 gpsp_rv32_io_write_mask32[256];
+
+static u32 rv32_io_write_mask(u32 ioreg)
+{
+  switch (ioreg)
+  {
+    case REG_BG0CNT:
+    case REG_BG1CNT:
+      return 0xDFFF;
+    case REG_WININ:
+    case REG_WINOUT:
+      return 0x3F3F;
+    case REG_BLDCNT:
+      return 0x3FFF;
+    case REG_BLDALPHA:
+      return 0x1F1F;
+    case REG_BLDY:
+      return 0x001F;
+
+    case REG_DISPCNT:
+    case REG_DISPSTAT:
+    case REG_VCOUNT:
+    case REG_BG2X_L ... REG_BG2Y_H:
+    case REG_BG3X_L ... REG_BG3Y_H:
+    case 0x30 ... 0x57:              /* sound, wave RAM and FIFOs */
+    case REG_DMA0CNT_H:
+    case REG_DMA1CNT_H:
+    case REG_DMA2CNT_H:
+    case REG_DMA3CNT_H:
+    case REG_TM0D ... REG_TM3CNT:
+    case REG_SIOCNT:
+    case REG_P1:
+    case REG_RCNT:
+    case REG_IE:
+    case REG_IF:
+    case REG_WAITCNT:
+    case REG_IME:
+    case 0x09B:
+    case 0x0A1:
+    case 0x0AD:
+    case 0x103:
+    case 0x105:
+    case 0x181:
+      return 0;
+
+    default:
+      return ioreg < 0x200 ? 0xFFFF : 0;
+  }
+}
+
+static void rv32_io_write_mask_init(void)
+{
+  for (u32 index = 0; index < 512; index++)
+    gpsp_rv32_io_write_mask16[index] = rv32_io_write_mask(index);
+  for (u32 index = 0; index < 256; index++)
+  {
+    u32 low = gpsp_rv32_io_write_mask16[index * 2];
+    u32 high = gpsp_rv32_io_write_mask16[index * 2 + 1];
+    gpsp_rv32_io_write_mask32[index] = low && high ? low | (high << 16) : 0;
+  }
+}
+#endif
 
 cpu_alert_type function_cc write_io_register8(u32 address, u32 value)
 {
@@ -1759,12 +1900,12 @@ void function_cc write_gpio(u32 address, u32 value) {
   {                                                                           \
     case 0x02:                                                                \
       /* external work RAM */                                                 \
-      address##type(ewram, (address & 0x3FFFF)) = eswap##type(value);         \
+      write_ram(type, ewram, (address & 0x3FFFF));                            \
       break;                                                                  \
                                                                               \
     case 0x03:                                                                \
       /* internal work RAM */                                                 \
-      address##type(iwram, (address & 0x7FFF) + 0x8000) = eswap##type(value); \
+      write_ram(type, iwram, (address & 0x7FFF) + 0x8000);                    \
       break;                                                                  \
                                                                               \
     case 0x04:                                                                \
@@ -2098,11 +2239,25 @@ const dma_region_type dma_region_map[17] =
 #define dma_read_ext(type, tfsize)                                            \
   read_value = read_memory##tfsize(type##_ptr)                                \
 
-#define dma_write_iwram(type, tfsize)                                         \
-  address##tfsize(iwram + 0x8000, type##_ptr & 0x7FFF) =                      \
-                                          eswap##tfsize(read_value);          \
-  if (address##tfsize(iwram, type##_ptr & 0x7FFF))                            \
+/* As in write_ram, only a write that changes code bytes raises SMC. */
+#define dma_write_code(dst, address, tfsize) {                                \
+  u##tfsize old = *(dst);                                                     \
+  *(dst) = eswap##tfsize(read_value);                                         \
+  if (*(dst) != old &&                                                        \
+      !code_write_absorbed(address, (tfsize) / 8, old, *(dst)))               \
+  {                                                                           \
+    dma_code_changed(address, (tfsize) / 8);                                  \
     alerts |= CPU_ALERT_SMC;                                                  \
+  }                                                                           \
+}
+
+#define dma_write_iwram(type, tfsize) {                                       \
+  u##tfsize *dst = &address##tfsize(iwram + 0x8000, type##_ptr & 0x7FFF);     \
+  if (address##tfsize(iwram, type##_ptr & 0x7FFF))                            \
+    dma_write_code(dst, 0x03000000 | (type##_ptr & 0x7FFF), tfsize)           \
+  else                                                                        \
+    *dst = eswap##tfsize(read_value);                                         \
+}
 
 #define dma_write_vram(type, tfsize) {                                        \
   u32 wraddr = type##_ptr & 0x1FFFF;                                          \
@@ -2122,10 +2277,13 @@ const dma_region_type dma_region_map[17] =
 #define dma_write_ext(type, tfsize)                                           \
   write_memory##tfsize(type##_ptr, read_value)                                \
 
-#define dma_write_ewram(type, tfsize)                                         \
-  address##tfsize(ewram, type##_ptr & 0x3FFFF) = eswap##tfsize(read_value);   \
+#define dma_write_ewram(type, tfsize) {                                       \
+  u##tfsize *dst = &address##tfsize(ewram, type##_ptr & 0x3FFFF);             \
   if (address##tfsize(ewram, (type##_ptr & 0x3FFFF) + 0x40000))               \
-    alerts |= CPU_ALERT_SMC;                                                  \
+    dma_write_code(dst, 0x02000000 | (type##_ptr & 0x3FFFF), tfsize)          \
+  else                                                                        \
+    *dst = eswap##tfsize(read_value);                                         \
+}
 
 #define print_line()                                                          \
   dma_print(src_op, dest_op, tfsize);                                         \
@@ -2450,6 +2608,10 @@ cpu_alert_type dma_transfer(unsigned dma_chan, int *usedcycles)
        def_seq_cycles[src_ptr >> 24][tfsizes - 1] +
        def_seq_cycles[dst_ptr >> 24][tfsizes - 1]);
 
+#if defined(GPSP_RV32_JIT)
+  if (ret & CPU_ALERT_SMC)
+    gpsp_rv32_add_memory_alert(CPU_ALERT_SMC);
+#endif
   return ret;
 }
 
@@ -2707,6 +2869,10 @@ void init_memory(void)
   rtc_state = RTC_DISABLED;
   memset(gpio_regs, 0, sizeof(gpio_regs));
   reg[REG_BUS_VALUE] = 0xe129f000;
+#if defined(GPSP_RV32_JIT)
+  rv32_io_read_mask_init();
+  rv32_io_write_mask_init();
+#endif
 }
 
 void memory_term(void)

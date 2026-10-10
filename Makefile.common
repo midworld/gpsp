@@ -32,6 +32,17 @@ SOURCES_C := $(CORE_DIR)/main.c \
              $(LIBRETRO_COMM_DIR)/time/rtime.c \
              $(LIBRETRO_COMM_DIR)/vfs/vfs_implementation.c
 
+# Accept both environment settings and make command-line assignments.
+GPSP_ISA_OPTIONS := GPSP_RV32_USE_ZBA GPSP_RV32_USE_ZBB GPSP_RV32_USE_ZBS \
+                    GPSP_RV32_USE_RVC GPSP_RV32_USE_ZCB
+GPSP_BOOL_OPTIONS := $(GPSP_ISA_OPTIONS)
+$(foreach option,$(GPSP_BOOL_OPTIONS),$(if $(filter-out 0 1,$($(option)))$(word 2,$($(option))),$(error $(option) must be 0 or 1)))
+
+DEFINES += $(foreach option,$(GPSP_ISA_OPTIONS),$(if $(strip $($(option))),-D$(option)=$($(option))))
+GPSP_SIZE_OPTIONS := GPSP_RV32_ROM_CACHE_KIB GPSP_RV32_RAM_CACHE_KIB \
+                     GPSP_RV32_CODE_CHUNK_KIB ROM_BUFFER_SIZE
+DEFINES += $(foreach option,$(GPSP_SIZE_OPTIONS),$(if $(strip $($(option))),-D$(option)=$($(option))))
+
 ifeq ($(HAVE_DYNAREC), 1)
   SOURCES_C += $(CORE_DIR)/cpu_threaded.c
   ifeq ($(CPU_ARCH), x86_32)
@@ -45,4 +56,38 @@ ifeq ($(HAVE_DYNAREC), 1)
   endif
 endif
 
+ifeq ($(platform), rv32)
+  ifeq ($(HAVE_DYNAREC), 1)
+    $(error RV32 JIT requires HAVE_DYNAREC=0)
+  endif
+  DEFINES += -DGPSP_RV32_JIT=1
+  SOURCES_C += $(CORE_DIR)/riscv/rv32_arm_alu.c \
+               $(CORE_DIR)/riscv/rv32_arm_branch.c \
+               $(CORE_DIR)/riscv/rv32_arm_mul.c \
+               $(CORE_DIR)/riscv/rv32_codegen.c \
+               $(CORE_DIR)/riscv/rv32_fallback.c \
+               $(CORE_DIR)/riscv/rv32_platform.c \
+               $(CORE_DIR)/riscv/rv32_thumb_alu.c
+  SOURCES_ASM += $(CORE_DIR)/riscv/rv32_stub.S
+  SOURCES_C += $(CORE_DIR)/cpu_threaded.c \
+               $(CORE_DIR)/riscv/rv32_arm_memory.c \
+               $(CORE_DIR)/riscv/rv32_arm_system.c \
+               $(CORE_DIR)/riscv/rv32_block_emit.c \
+               $(CORE_DIR)/riscv/rv32_block_link.c \
+               $(CORE_DIR)/riscv/rv32_ram_units.c \
+               $(CORE_DIR)/riscv/rv32_thumb_memory.c \
+               $(CORE_DIR)/riscv/rv32_flow_timing.c \
+               $(CORE_DIR)/riscv/rv32_arm_flow_alu.c \
+               $(CORE_DIR)/riscv/rv32_arm_flow_full.c \
+               $(CORE_DIR)/riscv/rv32_thumb_flow_full.c
+  SOURCES_CC += $(CORE_DIR)/riscv/rv32_block_runtime.cc
+  SOURCES_ASM += $(CORE_DIR)/riscv/rv32_arm_io.S \
+                 $(CORE_DIR)/riscv/rv32_arm_palette.S \
+                 $(CORE_DIR)/riscv/rv32_interpreter_stub.S \
+                 $(CORE_DIR)/riscv/rv32_rom_load.S \
+                 $(CORE_DIR)/riscv/rv32_thumb_multi_ram.S \
+                 $(CORE_DIR)/riscv/rv32_thumb_ram_helper.S \
+                 $(CORE_DIR)/riscv/rv32_thumb_ram_store.S \
+                 $(CORE_DIR)/riscv/rv32_thumb_exit_shared.S
+endif
 

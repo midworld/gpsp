@@ -15,6 +15,10 @@
 #include "../gba_memory.h"
 #include "../gba_cc_lut.h"
 
+#if defined(GPSP_RV32_JIT)
+#include "../riscv/rv32_block_runtime.h"
+#endif
+
 #if defined(VITA) && defined(HAVE_DYNAREC)
 #include <psp2/kernel/sysmem.h>
 static int translation_caches_inited = 0;
@@ -581,9 +585,9 @@ void retro_get_system_info(struct retro_system_info* info)
    info->library_name = GPSP_NAME;
  #ifdef GIT_VERSION
    info->library_version = GPSP_VERSION "-" GIT_VERSION;
- #else
+#else
    info->library_version = GPSP_VERSION;
- #endif
+#endif
    info->need_fullpath = true;
    info->block_extract = false;
    info->valid_extensions = "gba|bin|agb|gbz|u1" ;
@@ -633,7 +637,7 @@ void retro_init(void)
       log_cb(RETRO_LOG_ERROR,
              "Failed to map the JIT translation cache; "
              "falling back to the interpreter\n");
-  #elif defined(_3DS)
+#elif defined(_3DS)
    if (__ctr_svchax && !translation_caches_inited)
    {
       uint32_t currentHandle;
@@ -655,7 +659,7 @@ void retro_init(void)
       ctr_flush_invalidate_cache();
       translation_caches_inited = 1;
    }
-  #elif defined(VITA)
+#elif defined(VITA)
    if(!translation_caches_inited){
       void* currentHandle;
 
@@ -680,7 +684,7 @@ void retro_init(void)
       sceKernelOpenVMDomain();
       translation_caches_inited = 1;
     }
-  #endif
+#endif
 #endif
 
    init_gamepak_buffer();
@@ -729,6 +733,9 @@ void retro_init(void)
 
 void retro_deinit(void)
 {
+#if defined(GPSP_RV32_JIT)
+   gpsp_rv32_block_deinit();
+#endif
    perf_cb.perf_log();
    memory_term();
 
@@ -1306,6 +1313,11 @@ bool retro_load_game(const struct retro_game_info* info)
       memcpy(bios_rom, open_gba_bios_rom, sizeof(bios_rom));
    }
 
+#if defined(GPSP_RV32_JIT)
+   if (!gamepak_mini_materialized)
+      gpsp_rv32_block_init();
+#endif
+
 #ifdef HAVE_DYNAREC
    if (gamepak_mini_materialized && dynarec_enable)
    {
@@ -1336,6 +1348,9 @@ bool retro_load_game_special(unsigned game_type,
 
 void retro_unload_game(void)
 {
+#if defined(GPSP_RV32_JIT)
+   gpsp_rv32_block_deinit();
+#endif
    if (libretro_ff_enabled)
       set_fastforward_override(false);
 
@@ -1455,16 +1470,20 @@ void retro_run(void)
    }
 
    /* This runs just a frame */
+#if defined(GPSP_RV32_JIT)
+   execute_arm_translate(frame_start_cycles());
+#else
    #ifdef HAVE_DYNAREC
    if (dynarec_enable)
       execute_arm_translate(frame_start_cycles());
    else
-   #endif
+#endif
    {
       /* Sticky bits only used in interpreter */
       clear_gamepak_stickybits();
       execute_arm(frame_start_cycles());
    }
+#endif
 
    if (rumble_cb) {
      // TODO: Add some user-option to select a rumble policy

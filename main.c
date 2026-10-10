@@ -41,6 +41,10 @@ s32 video_count = 0;
 static u32 hblank_irq_pending = 0;
 /* DMA and IRQ entry cycles not yet charged to a CPU budget. */
 static u32 cpu_stall_cycles = 0;
+#if defined(GPSP_RV32_JIT)
+/* Scheduler state survives code cache invalidation. */
+u32 gpsp_rv32_frame_cycle_debt = 0;
+#endif
 
 u32 last_frame = 0;
 u32 flush_ram_count = 0;
@@ -128,11 +132,16 @@ void init_main(void)
   irq_entry_cycles = 0;
   hblank_irq_pending = 0;
   cpu_stall_cycles = 0;
+#if defined(GPSP_RV32_JIT)
+  gpsp_rv32_frame_cycle_debt = 0;
+#endif
 
-#ifdef HAVE_DYNAREC
-#if defined(MMAP_JIT_CACHE)
+#if defined(HAVE_DYNAREC) || defined(GPSP_RV32_JIT)
   /* No cache was mapped: the dynarec is pinned off and its state must
    * not be touched (init_emitter emits the BIOS SWI entry point). */
+#if defined(GPSP_RV32_JIT)
+  if (gpsp_rv32_rom_arena.count)
+#elif defined(MMAP_JIT_CACHE)
   if (rom_translation_cache)
 #endif
   {
@@ -416,6 +425,17 @@ bool main_check_savestate(const u8 *src)
    * written before this field existed; missing simply means "no pending
    * serial IRQ", which is also the default after serialproto_reset. */
 
+#if defined(GPSP_RV32_JIT)
+  if (bson_find_key(p1, "rv32-cycle-debt"))
+  {
+    u32 debt;
+    /* A generated burst is shorter than one 15-bit scheduler budget. */
+    if (!bson_contains_key(p1, "rv32-cycle-debt", BSON_TYPE_INT32) ||
+        !bson_read_int32(p1, "rv32-cycle-debt", &debt) || debt > 0x7fff)
+      return false;
+  }
+#endif
+
   for (i = 0; i < 4; i++)
   {
     char tname[2] = {'0' + i, 0};
@@ -465,6 +485,11 @@ bool main_read_savestate(const u8 *src)
 
   if (!bson_read_int32(p1, "frame-count", &frame_counter))
     frame_counter = 60 * 10;  // Use "fake" 10 seconds.
+
+#if defined(GPSP_RV32_JIT)
+  gpsp_rv32_frame_cycle_debt = 0;
+  bson_read_int32(p1, "rv32-cycle-debt", &gpsp_rv32_frame_cycle_debt);
+#endif
 
   {
     u32 sirq;
@@ -517,6 +542,9 @@ unsigned main_write_savestate(u8* dst)
   bson_write_int32(dst, "frame-count", frame_counter);
   bson_write_int32(dst, "cpu-ticks", cpu_ticks);
   bson_write_int32(dst, "exec-cycles", execute_cycles);
+#if defined(GPSP_RV32_JIT)
+  bson_write_int32(dst, "rv32-cycle-debt", gpsp_rv32_frame_cycle_debt);
+#endif
   bson_write_int32(dst, "video-count", video_count);
   bson_write_int32(dst, "stall-cycles", cpu_stall_cycles + irq_entry_cycles);
   bson_write_int32(dst, "hblank-irq", hblank_irq_pending);

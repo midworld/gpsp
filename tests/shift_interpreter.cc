@@ -58,7 +58,7 @@ static void reset_cpu(u32 opcode, bool thumb, u32 flags)
 static void run_one(u32 value, u32 expected, u32 flags, bool thumb)
 {
   reg[0] = value;
-  assert(execute_arm_internal(1, true) == 0x80000000);
+  assert(execute_arm_internal<false>(1, true) == 0x80000000);
   assert(update_count == 1);
   assert(reg[0] == expected);
   assert((reg[REG_CPSR] & 0xF0000000) == flags);
