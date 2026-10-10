@@ -1285,6 +1285,7 @@ cpu_alert_type function_cc write_io_register32(u32 address, u32 value)
   u16 val16 = (value << 8) | value;                                           \
   address16(palette_ram, aladdr) = eswap16(val16);                            \
   address16(palette_ram_converted, aladdr) = convert_palette(val16);          \
+  write_palette_expanded(aladdr, convert_palette(val16));                     \
 }
 
 #define write_palette16(address, value)                                       \
@@ -1293,6 +1294,7 @@ cpu_alert_type function_cc write_io_register32(u32 address, u32 value)
   address16(palette_ram, palette_address) = eswap16(value);                   \
   value = convert_palette(value);                                             \
   address16(palette_ram_converted, palette_address) = value;                  \
+  write_palette_expanded(palette_address, value);                             \
 }                                                                             \
 
 #define write_palette32(address, value)                                       \
@@ -1303,8 +1305,10 @@ cpu_alert_type function_cc write_io_register32(u32 address, u32 value)
   address32(palette_ram, palette_address) = eswap32(value);                   \
   value_high = convert_palette(value_high);                                   \
   address16(palette_ram_converted, palette_address + 2) = value_high;         \
+  write_palette_expanded(palette_address + 2, value_high);                    \
   value_low = convert_palette(value_low);                                     \
   address16(palette_ram_converted, palette_address) = value_low;              \
+  write_palette_expanded(palette_address, value_low);                         \
 }                                                                             \
 
 
@@ -2654,6 +2658,7 @@ void init_memory(void)
   for (i = 0; i < 512; i++)
   {
     palette_ram_converted[i] = convert_palette(0);
+    write_palette_expanded(i * 2, palette_ram_converted[i]);
   }
   memset(iwram, 0, sizeof(iwram));
   memset(ewram, 0, sizeof(ewram));

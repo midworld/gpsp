@@ -141,6 +141,16 @@ void video_reload_counters()
   affine_reference_y[1] = signext28(read_ioreg32(REG_BG3Y_L));
 }
 
+// A zero nibble (4bpp) or byte (8bpp) marks a transparent pixel. These test
+// a whole tile row (or half row for 8bpp) at once.
+static inline bool tile_row_opaque_4bpp(u32 row) {
+  return ((row - 0x11111111u) & ~row & 0x88888888u) == 0;
+}
+
+static inline bool tile_row_opaque_8bpp(u32 half) {
+  return ((half - 0x01010101u) & ~half & 0x80808080u) == 0;
+}
+
 // Renders non-affine tiled background layer.
 // Will process a full or partial tile (start and end within 0..8) and draw
 // it in either 8 or 4 bpp mode. Honors vertical and horizontal flip.
@@ -235,7 +245,21 @@ static inline void render_tile_Nbpp(
   if (is8bpp) {
     for (u32 j = 0; j < 2; j++) {
       u32 tilepix = eswap32(((u32*)tile_ptr)[hflip ? 1-j : j]);
-      if (tilepix) {
+      if (!tilepix) {   // Transparent half row: only the base layer draws
+        for (u32 i = 0; i < 4; i++, dest_ptr++)
+          if (isbase)
+            *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
+      } else if (tile_row_opaque_8bpp(tilepix)) {
+        for (u32 i = 0; i < 4; i++, dest_ptr++) {
+          u8 pval = hflip ? (tilepix >> (24 - i*8)) : (tilepix >> (i*8));
+          if (rdtype == FULLCOLOR)
+            *dest_ptr = paltbl[pval];
+          else if (rdtype == INDXCOLOR)
+            *dest_ptr = pval | px_comb;
+          else if (rdtype == STCKCOLOR)
+            *dest_ptr = pval | px_comb | ((isbase ? bg_comb : *dest_ptr) << 16);
+        }
+      } else {
         for (u32 i = 0; i < 4; i++, dest_ptr++) {
           u8 pval = hflip ? (tilepix >> (24 - i*8)) : (tilepix >> (i*8));
           if (pval) {
@@ -250,10 +274,6 @@ static inline void render_tile_Nbpp(
             *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
           }
         }
-      } else {
-        for (u32 i = 0; i < 4; i++, dest_ptr++)
-          if (isbase)
-            *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
       }
     }
   } else {
@@ -262,18 +282,32 @@ static inline void render_tile_Nbpp(
       u16 tilepal = (tile >> 12) << 4;
       u16 pxflg = px_comb | tilepal;
       const u16 *subpal = &paltbl[tilepal];
-      for (u32 i = 0; i < 8; i++, dest_ptr++) {
-        u8 pval = (hflip ? (tilepix >> ((7-i)*4)) : (tilepix >> (i*4))) & 0xF;
-        if (pval) {
+      if (tile_row_opaque_4bpp(tilepix)) {
+        for (u32 i = 0; i < 8; i++, dest_ptr++) {
+          u8 pval = hflip ? tilepix >> 28 : tilepix & 0xF;
           if (rdtype == FULLCOLOR)
             *dest_ptr = subpal[pval];
           else if (rdtype == INDXCOLOR)
             *dest_ptr = pxflg | pval;
           else if (rdtype == STCKCOLOR)
             *dest_ptr = pxflg | pval | ((isbase ? bg_comb : *dest_ptr) << 16);
+          if (hflip) tilepix <<= 4;
+          else       tilepix >>= 4;
         }
-        else if (isbase) {
-          *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
+      } else {
+        for (u32 i = 0; i < 8; i++, dest_ptr++) {
+          u8 pval = (hflip ? (tilepix >> ((7-i)*4)) : (tilepix >> (i*4))) & 0xF;
+          if (pval) {
+            if (rdtype == FULLCOLOR)
+              *dest_ptr = subpal[pval];
+            else if (rdtype == INDXCOLOR)
+              *dest_ptr = pxflg | pval;
+            else if (rdtype == STCKCOLOR)
+              *dest_ptr = pxflg | pval | ((isbase ? bg_comb : *dest_ptr) << 16);
+          }
+          else if (isbase) {
+            *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
+          }
         }
       }
     } else if (isbase) {
@@ -893,12 +927,17 @@ static inline void render_scanline_bitmap(
     if (source_x < 0) {
       // The bitmap starts somewhere after "start", skip those pixels.
       u32 delta = (-source_x + 255) >> 8;
+      if (delta >= end - start)
+        return;
       dst_ptr += delta;
       start += delta;
       source_x = 0;
     }
 
     u32 pixel_x = (u32)(source_x >> 8);
+    // The line starts right of the bitmap: nothing to draw.
+    if (pixel_x >= width)
+      return;
     u32 pixcnt = MIN(end - start, width - pixel_x);
     pixfmt *valptr = &src_ptr[pixel_x + (pixel_y * width)];
     pixfmt val = 0;
@@ -1732,6 +1771,26 @@ static void order_layers(u32 layer_flags, u32 vcnt)
   #define SATB_MSK 0x0000001F
 #endif
 
+// Encourages the compiler to load a value before a branch instead of next
+// to its use, where an in-order core stalls. Not guaranteed; checked in the
+// generated code with GCC 15.
+#if defined(__GNUC__)
+#define load_early(value) __asm__("" : "+r"(value))
+#else
+#define load_early(value) ((void)0)
+#endif
+
+// Palette color spread to 0G0R0B for the blend math.
+#ifdef PALETTE_EXPANDED
+static_assert(PALETTE_EXPAND_MASK == BLND_MSK, "Blend layouts differ");
+#define blend_color(index) palette_ram_expanded[index]
+#else
+static inline u32 blend_color(u32 index) {
+  u16 color = palette_ram_converted[index];
+  return (color | (color << 16)) & BLND_MSK;
+}
+#endif
+
 typedef enum
 {
   OBJ_BLEND,    // No effects, just blend forced-blend pixels (ie. ST objects)
@@ -1760,6 +1819,10 @@ static void merge_blend(u32 start, u32 end, u16 *dst, u32 *src) {
     // If blending can result in saturation, we need to clamp output values.
     while (start < end) {
       u32 pixpair = src[start];
+      // Load the plain color before branching: it hides the load latency
+      // on the common no-effect path.
+      u32 pixcol = palette_ram_converted[pixpair & 0x1FF];
+      load_early(pixcol);
       // If ST-OBJ, force blending mode (has priority over other effects).
       // If regular blending mode, blend if 1st/2nd bits are set respectively.
       // Otherwise, apply other color effects if 1st bit is set.
@@ -1767,10 +1830,8 @@ static void merge_blend(u32 start, u32 end, u16 *dst, u32 *src) {
       bool do_blend    = (pixpair & 0x04000200) == 0x04000200;
       if ((st_objs && force_blend) || (do_blend && bldtype == BLEND_ONLY)) {
         // Top pixel is 1st target, pixel below is 2nd target. Blend!
-        u16 p1 = palette_ram_converted[(pixpair >>  0) & 0x1FF];
-        u16 p2 = palette_ram_converted[(pixpair >> 16) & 0x1FF];
-        u32 p1e = (p1 | (p1 << 16)) & BLND_MSK;
-        u32 p2e = (p2 | (p2 << 16)) & BLND_MSK;
+        u32 p1e = blend_color((pixpair >>  0) & 0x1FF);
+        u32 p2e = blend_color((pixpair >> 16) & 0x1FF);
         u32 pfe = (((p1e * blend_a) + (p2e * blend_b)) >> 4);
 
         // If the overflow bit is set, saturate (set) all bits to one.
@@ -1788,43 +1849,41 @@ static void merge_blend(u32 start, u32 end, u16 *dst, u32 *src) {
       else if ((bldtype == BLEND_DARK || bldtype == BLEND_BRIGHT) &&
                (pixpair & 0x200) == 0x200) {
         // Top pixel is 1st-target, can still apply bright/dark effect.
-        u16 pidx = palette_ram_converted[pixpair & 0x1FF];
-        u32 epixel = (pidx | (pidx << 16)) & BLND_MSK;
+        u32 epixel = blend_color(pixpair & 0x1FF);
         u32 pa = bldtype == BLEND_DARK ? 0 : ((BLND_MSK * brightf) >> 4) & BLND_MSK;
         u32 pb = ((epixel * (16 - brightf)) >> 4) & BLND_MSK;
         epixel = (pa + pb) & BLND_MSK;
         dst[start++] = (epixel >> 16) | epixel;
       }
       else {
-        dst[start++] = palette_ram_converted[pixpair & 0x1FF];   // No effects
+        dst[start++] = pixcol;   // No effects
       }
     }
   } else {
     while (start < end) {
       u32 pixpair = src[start];
+      u32 pixcol = palette_ram_converted[pixpair & 0x1FF];
+      load_early(pixcol);
       bool do_blend    = (pixpair & 0x04000200) == 0x04000200;
       bool force_blend = (pixpair & 0x04000800) == 0x04000800;
       if ((st_objs && force_blend) || (do_blend && bldtype == BLEND_ONLY)) {
         // Top pixel is 1st target, pixel below is 2nd target. Blend!
-        u16 p1 = palette_ram_converted[(pixpair >>  0) & 0x1FF];
-        u16 p2 = palette_ram_converted[(pixpair >> 16) & 0x1FF];
-        u32 p1e = (p1 | (p1 << 16)) & BLND_MSK;
-        u32 p2e = (p2 | (p2 << 16)) & BLND_MSK;
+        u32 p1e = blend_color((pixpair >>  0) & 0x1FF);
+        u32 p2e = blend_color((pixpair >> 16) & 0x1FF);
         u32 pfe = (((p1e * blend_a) + (p2e * blend_b)) >> 4) & BLND_MSK;
         dst[start++] = (pfe >> 16) | pfe;
       }
       else if ((bldtype == BLEND_DARK || bldtype == BLEND_BRIGHT) &&
                (pixpair & 0x200) == 0x200) {
         // Top pixel is 1st-target, can still apply bright/dark effect.
-        u16 pidx = palette_ram_converted[pixpair & 0x1FF];
-        u32 epixel = (pidx | (pidx << 16)) & BLND_MSK;
+        u32 epixel = blend_color(pixpair & 0x1FF);
         u32 pa = bldtype == BLEND_DARK ? 0 : ((BLND_MSK * brightf) >> 4) & BLND_MSK;
         u32 pb = ((epixel * (16 - brightf)) >> 4) & BLND_MSK;
         epixel = (pa + pb) & BLND_MSK;
         dst[start++] = (epixel >> 16) | epixel;
       }
       else {
-        dst[start++] = palette_ram_converted[pixpair & 0x1FF];   // No effects
+        dst[start++] = pixcol;   // No effects
       }
     }
   }
@@ -1841,7 +1900,7 @@ static void merge_brightness(u32 start, u32 end, u16 *srcdst) {
 
     if ((spix & 0x200) == 0x200) {
       // Pixel is 1st target, can apply color effect.
-      u32 epixel = (pixcol | (pixcol << 16)) & BLND_MSK;
+      u32 epixel = blend_color(spix & 0x1FF);
       u32 pa = bldtype == BLEND_DARK ? 0 : ((BLND_MSK * brightness) >> 4) & BLND_MSK; // B/W
       u32 pb = ((epixel * (16 - brightness)) >> 4) & BLND_MSK;  // Pixel color
       epixel = (pa + pb) & BLND_MSK;
@@ -2083,6 +2142,62 @@ static const bitmap_layer_render_struct idx32_bmrend[3][2] =
   bitmap_layer_render_functions(INDXCOLOR, u32, 5, u16, 160, 128)
 };
 
+// Mode 4 BG2 without scaling, rotation or mosaic, drawn over the backdrop
+// in one pass. Index 0 shows the backdrop, which is BG palette entry 0, so
+// every pixel is a palette lookup. BG2 must be the bottom layer.
+static void render_mode4_blit_backdrop(u32 start, u32 end, u16 *scanline)
+{
+  const u16 bgcol = palette_ram_converted[0];
+  s32 source_x = affine_reference_x[0] + start * 256;
+  u32 pixel_y = (u32)(affine_reference_y[0] >> 8);
+  u16 *dst_ptr = scanline + start;
+  u32 count = end - start;
+  u32 skip = 0, pixcnt = 0;
+
+  if (pixel_y < 160)
+  {
+    if (source_x < 0)
+    {
+      skip = MIN(count, (u32)(-source_x + 255) >> 8);
+      source_x = 0;
+    }
+    u32 pixel_x = (u32)(source_x >> 8);
+    if (pixel_x < 240)
+      pixcnt = MIN(count - skip, 240 - pixel_x);
+    for (u32 i = 0; i < skip; i++)
+      *dst_ptr++ = bgcol;
+  }
+  if (pixcnt)
+  {
+    bool second_frame = (read_ioreg(REG_DISPCNT) & 0x10) != 0;
+    const u8 *src_ptr = &vram[second_frame ? 0xA000 : 0x0000] +
+        (u32)(source_x >> 8) + pixel_y * 240;
+    u32 i = 0;
+    // Aligned runs read four indices and write two pixel pairs. memcpy
+    // keeps the accesses well typed; the alignment hints make them lw/sw.
+    if (!(((uintptr_t)src_ptr | (uintptr_t)dst_ptr) & 3))
+    {
+      const u8 *src4 = (const u8 *)__builtin_assume_aligned(src_ptr, 4);
+      u16 *dst4 = (u16 *)__builtin_assume_aligned(dst_ptr, 4);
+      for (; i + 4 <= pixcnt; i += 4)
+      {
+        u32 idx, pair[2];
+        memcpy(&idx, src4 + i, sizeof(idx));
+        pair[0] = palette_ram_converted[idx & 0xff] |
+            ((u32)palette_ram_converted[(idx >> 8) & 0xff] << 16);
+        pair[1] = palette_ram_converted[(idx >> 16) & 0xff] |
+            ((u32)palette_ram_converted[idx >> 24] << 16);
+        memcpy(dst4 + i, pair, sizeof(pair));
+      }
+    }
+    for (; i < pixcnt; i++)
+      dst_ptr[i] = palette_ram_converted[src_ptr[i]];
+    dst_ptr += pixcnt;
+  }
+  for (u32 i = skip + pixcnt; i < count; i++)
+    *dst_ptr++ = bgcol;
+}
+
 // Render the BG and OBJ in a bitmap scanline from start to end ONLY if
 // enable_flag allows that layer/OBJ.
 
@@ -2113,10 +2228,21 @@ static void bitmap_render_layers(
 
   u32 current_layer;
   u32 layer_order_pos;
+  u32 first_layer = 0;
 
-  fill_line_background<bgmode, dsttype>(start, end, scanline);
+  // A bottom BG2 layer that covers the line replaces the backdrop fill.
+  if (bgmode == FULLCOLOR && modeidx == 1 && !mmode && layer_count &&
+      !(layer_order[0] & 0x04) && (enable_flags & 0x04) &&
+      !(s16)read_ioreg(REG_BG2PC) && (s16)read_ioreg(REG_BG2PA) == 256)
+  {
+    render_mode4_blit_backdrop(start, end, (u16 *)scanline);
+    first_layer = 1;
+  }
+  else
+    fill_line_background<bgmode, dsttype>(start, end, scanline);
 
-  for(layer_order_pos = 0; layer_order_pos < layer_count; layer_order_pos++)
+  for(layer_order_pos = first_layer; layer_order_pos < layer_count;
+      layer_order_pos++)
   {
     current_layer = layer_order[layer_order_pos];
     if(current_layer & 0x04)
@@ -2396,5 +2522,3 @@ void update_scanline(void)
     }
   }
 }
-
-

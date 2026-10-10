@@ -233,6 +233,7 @@ bool gba_load_state(const void* src)
   for(i = 0; i < 512; i++)
   {
      palette_ram_converted[i] = convert_palette(eswap16(palette_ram[i]));
+     write_palette_expanded(i * 2, palette_ram_converted[i]);
   }
 
   video_reload_counters();

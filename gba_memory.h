@@ -342,6 +342,23 @@ extern u8 open_gba_bios_rom[1024*16];
 extern u16 palette_ram[512];
 extern u16 oam_ram[512];
 extern u16 palette_ram_converted[512];
+#if defined(__riscv)
+/* Converted colors spread to 0G0R0B for blending. Only the RISC-V JIT
+   palette helpers keep this in sync, so other ports do not use it. */
+#define PALETTE_EXPANDED
+#if defined(USE_XBGR1555_FORMAT)
+  #define PALETTE_EXPAND_MASK 0x03E07C1F
+#else
+  #define PALETTE_EXPAND_MASK 0x07E0F81F
+#endif
+#define palette_expand(color) \
+  ((((u32)(color) << 16) | (color)) & PALETTE_EXPAND_MASK)
+extern u32 palette_ram_expanded[512];
+#define write_palette_expanded(address, color) \
+  palette_ram_expanded[(address) >> 1] = palette_expand(color)
+#else
+#define write_palette_expanded(address, color)
+#endif
 extern u16 io_registers[512];
 extern u8 vram[1024 * 96];
 extern u8 bios_rom[1024 * 16];
